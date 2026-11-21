@@ -1,3 +1,4 @@
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include "common/profiler.hpp"
@@ -65,10 +66,60 @@ const char* names[BUCKET_COUNT] =
     "jit-mem", "jit-interp", "jit-codecheck", "jit-glue", "loop", "frontend"
 };
 
-void charge(Clock::time_point now)
+//Time spent with no bucket open ("other"), split by the bucket that was left last and the one
+//entered next, so a gap in the instrumentation can be found: "other: arm9>dsp 120.0" means
+//120 ms passed between leaving arm9 and entering dsp.
+int last_left = OTHER;
+//The profiler only follows the emulation thread; calls from other threads would corrupt the stack
+std::thread::id owner;
+bool have_owner = false;
+uint64_t foreign_calls = 0;
+
+}
+
+void claim_thread()
+{
+    owner = std::this_thread::get_id();
+    have_owner = true;
+}
+
+namespace
+{
+
+bool foreign()
+{
+    auto id = std::this_thread::get_id();
+    if (!have_owner)
+    {
+        owner = id;
+        have_owner = true;
+    }
+    if (id != owner)
+    {
+        foreign_calls++;
+        return true;
+    }
+    return false;
+}
+double gaps[BUCKET_COUNT][BUCKET_COUNT];
+double gap_max;
+int gap_max_from, gap_max_to;
+
+void charge(Clock::time_point now, int next = -1)
 {
     Bucket cur = depth ? stack[depth - 1] : OTHER;
-    totals[cur] += std::chrono::duration<double, std::milli>(now - last_switch).count();
+    double ms = std::chrono::duration<double, std::milli>(now - last_switch).count();
+    totals[cur] += ms;
+    if (!depth && next >= 0)
+    {
+        gaps[last_left][next] += ms;
+        if (ms > gap_max)
+        {
+            gap_max = ms;
+            gap_max_from = last_left;
+            gap_max_to = next;
+        }
+    }
     last_switch = now;
 }
 
@@ -79,6 +130,7 @@ void init()
     const char* env = std::getenv("BLOSSOM_PROFILE");
     enabled = env && env[0] && env[0] != '0';
     depth = 0;
+    have_owner = false;
     for (double& t : totals)
         t = 0;
     for (uint64_t& c : counters)
@@ -88,7 +140,9 @@ void init()
 
 void enter(Bucket b)
 {
-    charge(Clock::now());
+    if (foreign())
+        return;
+    charge(Clock::now(), b);
     if (depth < MAX_DEPTH)
         stack[depth] = b;
     depth++;
@@ -96,9 +150,15 @@ void enter(Bucket b)
 
 void leave()
 {
+    if (foreign())
+        return;
     charge(Clock::now());
     if (depth > 0)
+    {
         depth--;
+        if (!depth)
+            last_left = depth < MAX_DEPTH ? stack[0] : OTHER;
+    }
 }
 
 void end_frame(int frame)
@@ -106,7 +166,7 @@ void end_frame(int frame)
     if (!enabled)
         return;
     auto now = Clock::now();
-    charge(now);
+    charge(now, OTHER); //a gap since the last bucket shows as "...>other"
     double total = std::chrono::duration<double, std::milli>(now - frame_start).count();
     std::fprintf(stderr, "[PROFILE] frame %d: %.1f ms |", frame, total);
     for (int i = 0; i < BUCKET_COUNT; i++)
@@ -122,6 +182,33 @@ void end_frame(int frame)
         counters[i] = 0;
     }
     std::fprintf(stderr, " | ram %ld MB\n", resident_mb());
+
+    //Where "other" went: the three biggest gaps between buckets, and the longest single gap
+    struct Gap { double ms; int from, to; } top[3] = {};
+    for (int a = 0; a < BUCKET_COUNT; a++)
+        for (int b = 0; b < BUCKET_COUNT; b++)
+        {
+            double ms = gaps[a][b];
+            gaps[a][b] = 0;
+            for (int k = 0; k < 3; k++)
+                if (ms > top[k].ms)
+                {
+                    for (int m = 2; m > k; m--)
+                        top[m] = top[m - 1];
+                    top[k] = {ms, a, b};
+                    break;
+                }
+        }
+    std::fprintf(stderr, "[PROFILE] frame %d other:", frame);
+    for (auto& g : top)
+        if (g.ms >= 0.05)
+            std::fprintf(stderr, " %s>%s %.1f", names[g.from], names[g.to], g.ms);
+    std::fprintf(stderr, " | longest %.1f ms (%s>%s)", gap_max, names[gap_max_from], names[gap_max_to]);
+    if (foreign_calls)
+        std::fprintf(stderr, " | calls from other threads %llu", (unsigned long long)foreign_calls);
+    std::fprintf(stderr, "\n");
+    foreign_calls = 0;
+    gap_max = 0;
     frame_start = now;
 }
 

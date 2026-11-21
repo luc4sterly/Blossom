@@ -371,6 +371,7 @@ void Emulator::watchdog_loop()
 
 void Emulator::run()
 {
+    Profiler::claim_thread();
     start_watchdog();
     i2c.update_time();
     printf("FRAME %d\n", frames);
