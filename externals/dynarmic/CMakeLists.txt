@@ -177,7 +177,7 @@ if ("x86_64" IN_LIST ARCHITECTURE)
         find_package(xbyak 7 CONFIG)
     endif()
     if (NOT TARGET Zydis::Zydis)
-        find_package(Zydis 4 CONFIG)
+        find_package(Zydis 4 CONFIG QUIET)
     endif()
 endif()
 

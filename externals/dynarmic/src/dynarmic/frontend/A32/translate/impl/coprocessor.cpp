@@ -9,6 +9,10 @@ namespace Dynarmic::A32 {
 
 // CDP{2} <coproc_no>, #<opc1>, <CRd>, <CRn>, <CRm>, #<opc2>
 bool TranslatorVisitor::arm_CDP(Cond cond, size_t opc1, CoprocReg CRn, CoprocReg CRd, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }
@@ -25,6 +29,10 @@ bool TranslatorVisitor::arm_CDP(Cond cond, size_t opc1, CoprocReg CRn, CoprocReg
 // LDC{2}{L}<c> <coproc_no>, <CRd>, [<Rn>], #+/-<imm32>
 // LDC{2}{L}<c> <coproc_no>, <CRd>, [<Rn>], <imm8>
 bool TranslatorVisitor::arm_LDC(Cond cond, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!p && !u && !d && !w) {
         return arm_UDF();
     }
@@ -54,6 +62,10 @@ bool TranslatorVisitor::arm_LDC(Cond cond, bool p, bool u, bool d, bool w, Reg n
 
 // MCR{2}<c> <coproc_no>, #<opc1>, <Rt>, <CRn>, <CRm>, #<opc2>
 bool TranslatorVisitor::arm_MCR(Cond cond, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }
@@ -72,6 +84,10 @@ bool TranslatorVisitor::arm_MCR(Cond cond, size_t opc1, CoprocReg CRn, Reg t, si
 
 // MCRR{2}<c> <coproc_no>, #<opc>, <Rt>, <Rt2>, <CRm>
 bool TranslatorVisitor::arm_MCRR(Cond cond, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }
@@ -90,6 +106,16 @@ bool TranslatorVisitor::arm_MCRR(Cond cond, Reg t2, Reg t, size_t coproc_no, siz
 
 // MRC{2}<c> <coproc_no>, #<opc1>, <Rt>, <CRn>, <CRm>, #<opc2>
 bool TranslatorVisitor::arm_MRC(Cond cond, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them,
+    // except reads of the CP15 thread ID registers (TLS), which user code does very often.
+    if (options.interpret_system_instructions) {
+        const bool thread_id_read = options.fast_cp15_thread_id && coproc_no == 15 && opc1 == 0
+                                    && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 >= 2 && opc2 <= 4
+                                    && t != Reg::PC && cond != Cond::NV;
+        if (!thread_id_read) {
+            return InterpretThisInstruction();
+        }
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }
@@ -110,6 +136,10 @@ bool TranslatorVisitor::arm_MRC(Cond cond, size_t opc1, CoprocReg CRn, Reg t, si
 
 // MRRC{2}<c> <coproc_no>, #<opc>, <Rt>, <Rt2>, <CRm>
 bool TranslatorVisitor::arm_MRRC(Cond cond, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }
@@ -132,6 +162,10 @@ bool TranslatorVisitor::arm_MRRC(Cond cond, Reg t2, Reg t, size_t coproc_no, siz
 // STC{2}{L}<c> <coproc>, <CRd>, [<Rn>], #+/-<imm32>
 // STC{2}{L}<c> <coproc>, <CRd>, [<Rn>], <imm8>
 bool TranslatorVisitor::arm_STC(Cond cond, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if ((coproc_no & 0b1110) == 0b1010) {
         return arm_UDF();
     }

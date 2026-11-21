@@ -8,11 +8,19 @@
 namespace Dynarmic::A32 {
 
 bool TranslatorVisitor::thumb32_MCRR(bool two, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     ir.CoprocSendTwoWords(coproc_no, two, opc, CRm, ir.GetRegister(t), ir.GetRegister(t2));
     return true;
 }
 
 bool TranslatorVisitor::thumb32_MRRC(bool two, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
     ir.SetRegister(t, ir.LeastSignificantWord(two_words));
     ir.SetRegister(t2, ir.MostSignificantWord(two_words).result);
@@ -20,6 +28,10 @@ bool TranslatorVisitor::thumb32_MRRC(bool two, Reg t2, Reg t, size_t coproc_no, 
 }
 
 bool TranslatorVisitor::thumb32_STC(bool two, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     const u32 imm32 = imm8.ZeroExtend() << 2;
     const bool index = p;
     const bool add = u;
@@ -36,6 +48,10 @@ bool TranslatorVisitor::thumb32_STC(bool two, bool p, bool u, bool d, bool w, Re
 }
 
 bool TranslatorVisitor::thumb32_LDC(bool two, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     const u32 imm32 = imm8.ZeroExtend() << 2;
     const bool index = p;
     const bool add = u;
@@ -52,16 +68,28 @@ bool TranslatorVisitor::thumb32_LDC(bool two, bool p, bool u, bool d, bool w, Re
 }
 
 bool TranslatorVisitor::thumb32_CDP(bool two, size_t opc1, CoprocReg CRn, CoprocReg CRd, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     ir.CoprocInternalOperation(coproc_no, two, opc1, CRd, CRn, CRm, opc2);
     return true;
 }
 
 bool TranslatorVisitor::thumb32_MCR(bool two, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     ir.CoprocSendOneWord(coproc_no, two, opc1, CRn, CRm, opc2, ir.GetRegister(t));
     return true;
 }
 
 bool TranslatorVisitor::thumb32_MRC(bool two, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     const auto word = ir.CoprocGetOneWord(coproc_no, two, opc1, CRn, CRm, opc2);
     if (t != Reg::PC) {
         ir.SetRegister(t, word);

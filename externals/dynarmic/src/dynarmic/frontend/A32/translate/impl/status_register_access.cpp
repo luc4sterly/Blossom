@@ -33,6 +33,11 @@ bool TranslatorVisitor::arm_MRS(Cond cond, Reg d) {
 bool TranslatorVisitor::arm_MSR_imm(Cond cond, unsigned mask, int rotate, Imm<8> imm8) {
     ASSERT_MSG(mask != 0, "Decode error");
 
+    // Blossom: writes to the control field (mode, I, F, T) are privileged; let the interpreter do them.
+    if (options.interpret_system_instructions && mcl::bit::get_bit<0>(mask)) {
+        return InterpretThisInstruction();
+    }
+
     if (!ArmConditionPassed(cond)) {
         return true;
     }
@@ -63,6 +68,10 @@ bool TranslatorVisitor::arm_MSR_imm(Cond cond, unsigned mask, int rotate, Imm<8>
 
 // MSR<c> <spec_reg>, <Rn>
 bool TranslatorVisitor::arm_MSR_reg(Cond cond, unsigned mask, Reg n) {
+    // Blossom: writes to the control field (mode, I, F, T) are privileged; let the interpreter do them.
+    if (options.interpret_system_instructions && mcl::bit::get_bit<0>(mask)) {
+        return InterpretThisInstruction();
+    }
     if (mask == 0) {
         return UnpredictableInstruction();
     }

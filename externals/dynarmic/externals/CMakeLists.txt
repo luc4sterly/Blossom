@@ -73,7 +73,7 @@ endif()
 # zydis
 
 if (NOT TARGET Zydis::Zydis)
-    if ("x86_64" IN_LIST ARCHITECTURE)
+    if ("x86_64" IN_LIST ARCHITECTURE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/zydis/CMakeLists.txt")
         set(ZYDIS_BUILD_TOOLS OFF)
         set(ZYDIS_BUILD_EXAMPLES OFF)
         set(ZYDIS_BUILD_DOXYGEN OFF)

@@ -78,6 +78,17 @@ public:
     std::uint32_t Fpscr() const;
     void SetFpscr(std::uint32_t value);
 
+    /**
+     * Blossom: opaque context that is part of every block's location descriptor, so compiled code
+     * is only reused under the same context. Only the bits in CONTEXT_MASK (0x780000F8) are kept.
+     * Bit 3 (0x8) means "VFP disabled": VFP instructions then go to InterpreterFallback.
+     * Set this only between calls to Run (or from InterpreterFallback).
+     */
+    static constexpr std::uint32_t CONTEXT_MASK = 0x780000F8;
+    static constexpr std::uint32_t CONTEXT_VFP_DISABLED = 0x00000008;
+    std::uint32_t Context() const;
+    void SetContext(std::uint32_t value);
+
     /// Clears exclusive state for this core.
     void ClearExclusiveState();
 

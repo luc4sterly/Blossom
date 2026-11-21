@@ -639,6 +639,9 @@ bool TranslatorVisitor::thumb16_SUB_sp(Imm<7> imm7) {
 
 // SEV<c>
 bool TranslatorVisitor::thumb16_SEV() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }
@@ -655,6 +658,9 @@ bool TranslatorVisitor::thumb16_SEVL() {
 
 // WFE<c>
 bool TranslatorVisitor::thumb16_WFE() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }
@@ -663,6 +669,9 @@ bool TranslatorVisitor::thumb16_WFE() {
 
 // WFI<c>
 bool TranslatorVisitor::thumb16_WFI() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }
@@ -807,6 +816,9 @@ bool TranslatorVisitor::thumb16_SETEND(bool E) {
 // CPS{IE,ID} <a,i,f>
 // A CPS is treated as a NOP in User mode.
 bool TranslatorVisitor::thumb16_CPS(bool, bool, bool, bool) {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     return true;
 }
 

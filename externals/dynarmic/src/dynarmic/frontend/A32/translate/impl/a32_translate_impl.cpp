@@ -46,6 +46,11 @@ bool TranslatorVisitor::DecodeError() {
 }
 
 bool TranslatorVisitor::RaiseException(Exception exception) {
+    // Blossom: in LLE mode the embedder's interpreter implements every exception-raising case
+    // (undefined/unpredictable encodings, breakpoints, hints), except instruction fetch faults.
+    if (options.interpret_system_instructions && exception != Exception::NoExecuteFault) {
+        return InterpretThisInstruction();
+    }
     ir.UpdateUpperLocationDescriptor();
     ir.BranchWritePC(ir.Imm32(ir.current_location.PC() + static_cast<u32>(current_instruction_size)));
     ir.ExceptionRaised(exception);

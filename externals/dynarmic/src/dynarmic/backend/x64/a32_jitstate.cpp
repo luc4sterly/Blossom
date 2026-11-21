@@ -86,7 +86,8 @@ void A32JitState::SetCpsr(u32 cpsr) {
     cpsr_ge |= mcl::bit::get_bit<17>(cpsr) ? 0x0000FF00 : 0;
     cpsr_ge |= mcl::bit::get_bit<16>(cpsr) ? 0x000000FF : 0;
 
-    upper_location_descriptor &= 0xFFFF0000;
+    // Blossom: keep the embedder context bits (CONTEXT_MASK) intact.
+    upper_location_descriptor &= 0xFFFF0000 | A32::LocationDescriptor::CONTEXT_MASK;
     // E flag, T flag
     upper_location_descriptor |= mcl::bit::get_bit<9>(cpsr) ? 2 : 0;
     upper_location_descriptor |= mcl::bit::get_bit<5>(cpsr) ? 1 : 0;
@@ -182,7 +183,9 @@ void A32JitState::SetFpscr(u32 FPSCR) {
     // Ensure that only upper half of upper_location_descriptor is used for FPSCR bits.
     static_assert((FPSCR_MODE_MASK & 0xFFFF0000) == FPSCR_MODE_MASK);
 
-    upper_location_descriptor &= 0x0000FFFF;
+    // Blossom: keep the embedder context bits (CONTEXT_MASK) intact.
+    static_assert((FPSCR_MODE_MASK & A32::LocationDescriptor::CONTEXT_MASK) == 0);
+    upper_location_descriptor &= 0x0000FFFF | A32::LocationDescriptor::CONTEXT_MASK;
     upper_location_descriptor |= FPSCR & FPSCR_MODE_MASK;
 
     fpsr_nzcv = FPSCR & FPSCR_NZCV_MASK;

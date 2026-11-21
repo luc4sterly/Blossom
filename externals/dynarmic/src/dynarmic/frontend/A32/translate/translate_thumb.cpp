@@ -107,6 +107,8 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
     TranslatorVisitor visitor{block, descriptor, options};
 
     bool should_continue = true;
+    // Blossom: optional cap on block length (bounds cycle overshoot and translation time)
+    size_t block_instructions = 0;
     do {
         const u32 arm_pc = visitor.ir.current_location.PC();
         u64 ticks_for_instruction = 1;
@@ -134,7 +136,12 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
                 } else {
                     if (MaybeVFPOrASIMDInstruction(thumb_instruction)) {
                         if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(thumb_instruction)) {
-                            should_continue = vfp_decoder->get().call(visitor, thumb_instruction);
+                            // Blossom: FPEXC.EN = 0 makes every VFP instruction undefined; the interpreter raises it.
+                            if (visitor.options.interpret_system_instructions && visitor.ir.current_location.VFPDisabled()) {
+                                should_continue = visitor.InterpretThisInstruction();
+                            } else {
+                                should_continue = vfp_decoder->get().call(visitor, thumb_instruction);
+                            }
                         } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(ConvertASIMDInstruction(thumb_instruction))) {
                             should_continue = asimd_decoder->get().call(visitor, ConvertASIMDInstruction(thumb_instruction));
                         } else if (const auto decoder = DecodeThumb32<TranslatorVisitor>(thumb_instruction)) {
@@ -161,7 +168,8 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
 
         visitor.ir.current_location = visitor.ir.current_location.AdvancePC(static_cast<int>(visitor.current_instruction_size)).AdvanceIT();
         block.CycleCount() += ticks_for_instruction;
-    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step);
+    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step
+             && (options.max_block_instructions == 0 || ++block_instructions < options.max_block_instructions));
 
     if (visitor.cond_state == ConditionalState::Translating || visitor.cond_state == ConditionalState::Trailing || single_step) {
         if (should_continue) {
@@ -200,7 +208,12 @@ bool TranslateSingleThumbInstruction(IR::Block& block, LocationDescriptor descri
         thumb_instruction = mcl::bit::swap_halves_32(thumb_instruction);
         if (MaybeVFPOrASIMDInstruction(thumb_instruction)) {
             if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(thumb_instruction)) {
-                should_continue = vfp_decoder->get().call(visitor, thumb_instruction);
+                // Blossom: FPEXC.EN = 0 makes every VFP instruction undefined; the interpreter raises it.
+                if (visitor.options.interpret_system_instructions && visitor.ir.current_location.VFPDisabled()) {
+                    should_continue = visitor.InterpretThisInstruction();
+                } else {
+                    should_continue = vfp_decoder->get().call(visitor, thumb_instruction);
+                }
             } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(ConvertASIMDInstruction(thumb_instruction))) {
                 should_continue = asimd_decoder->get().call(visitor, ConvertASIMDInstruction(thumb_instruction));
             } else if (const auto decoder = DecodeThumb32<TranslatorVisitor>(thumb_instruction)) {

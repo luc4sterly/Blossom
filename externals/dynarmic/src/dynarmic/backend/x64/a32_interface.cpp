@@ -173,6 +173,15 @@ struct Jit::Impl {
         return jit_state.SetFpscr(value);
     }
 
+    u32 Context() const {
+        return jit_state.upper_location_descriptor & A32::LocationDescriptor::CONTEXT_MASK;
+    }
+
+    void SetContext(u32 value) {
+        jit_state.upper_location_descriptor &= ~A32::LocationDescriptor::CONTEXT_MASK;
+        jit_state.upper_location_descriptor |= value & A32::LocationDescriptor::CONTEXT_MASK;
+    }
+
     void DumpDisassembly() const {
         const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
         Common::DumpDisassembledX64(block_of_code.GetCodeBegin(), size);
@@ -213,7 +222,7 @@ private:
         }
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions});
         Optimization::PolyfillPass(ir_block, polyfill_options);
         Optimization::NamingPass(ir_block);
         if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
@@ -330,6 +339,14 @@ std::uint32_t Jit::Fpscr() const {
 
 void Jit::SetFpscr(std::uint32_t value) {
     impl->SetFpscr(value);
+}
+
+std::uint32_t Jit::Context() const {
+    return impl->Context();
+}
+
+void Jit::SetContext(std::uint32_t value) {
+    impl->SetContext(value);
 }
 
 void Jit::ClearExclusiveState() {

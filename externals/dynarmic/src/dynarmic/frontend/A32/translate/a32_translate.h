@@ -29,6 +29,18 @@ struct TranslationOptions {
     /// If this is false, we treat the instruction as a NOP.
     /// If this is true, we emit an ExceptionRaised instruction.
     bool hook_hint_instructions = true;
+
+    /// Blossom (LLE): send privileged/system instructions that dynarmic only models for user mode
+    /// (coprocessor access, MSR to the control field, CPS, WFI/WFE/SEV, VFP while FPEXC.EN = 0, and
+    /// every unpredictable/undefined encoding) to UserCallbacks::InterpreterFallback.
+    bool interpret_system_instructions = false;
+
+    /// Blossom (LLE): with interpret_system_instructions, still compile MRC p15, 0, Rt, c13, c0, {2-4}
+    /// (thread ID registers) through the registered coprocessor 15.
+    bool fast_cp15_thread_id = false;
+
+    /// Blossom: stop a block after this many instructions (0 = no limit).
+    size_t max_block_instructions = 0;
 };
 
 /**

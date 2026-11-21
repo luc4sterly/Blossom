@@ -464,7 +464,9 @@ void A32EmitX64::EmitA32SetCpsr(A32EmitContext& ctx, IR::Inst* inst) {
         // This mask is 0x7FFF0000, because we do not want the MSB to be sign extended to the upper dword.
         static_assert((A32::LocationDescriptor::FPSCR_MODE_MASK & ~0x7FFF0000) == 0);
 
-        code.and_(qword[r15 + offsetof(A32JitState, upper_location_descriptor)], u32(0x7FFF0000));
+        // Blossom: the embedder context bits (CONTEXT_MASK) survive CPSR writes.
+        static_assert((A32::LocationDescriptor::CONTEXT_MASK & ~0x7FFF00FF) == 0);
+        code.and_(qword[r15 + offsetof(A32JitState, upper_location_descriptor)], u32(0x7FFF0000 | A32::LocationDescriptor::CONTEXT_MASK));
         code.mov(tmp, 0x000f0220);
         code.pext(cpsr, cpsr, tmp);
         code.mov(tmp.cvt64(), 0x01010101'00000003ull);
@@ -476,7 +478,7 @@ void A32EmitX64::EmitA32SetCpsr(A32EmitContext& ctx, IR::Inst* inst) {
         code.xor_(tmp.cvt64(), tmp2.cvt64());
         code.or_(qword[r15 + offsetof(A32JitState, upper_location_descriptor)], tmp.cvt64());
     } else {
-        code.and_(dword[r15 + offsetof(A32JitState, upper_location_descriptor)], u32(0xFFFF0000));
+        code.and_(dword[r15 + offsetof(A32JitState, upper_location_descriptor)], u32(0xFFFF0000 | A32::LocationDescriptor::CONTEXT_MASK));
         code.mov(tmp, cpsr);
         code.and_(tmp, 0x00000220);
         code.imul(tmp, tmp, 0x00900000);

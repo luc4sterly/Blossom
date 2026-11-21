@@ -26,6 +26,8 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
     TranslatorVisitor visitor{block, descriptor, options};
 
     bool should_continue = true;
+    // Blossom: optional cap on block length (bounds cycle overshoot and translation time)
+    size_t block_instructions = 0;
     do {
         const u32 arm_pc = visitor.ir.current_location.PC();
         u64 ticks_for_instruction = 1;
@@ -42,7 +44,12 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
             ticks_for_instruction = tcb->GetTicksForCode(false, arm_pc, *arm_instruction);
 
             if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(*arm_instruction)) {
-                should_continue = vfp_decoder->get().call(visitor, *arm_instruction);
+                // Blossom: FPEXC.EN = 0 makes every VFP instruction undefined; the interpreter raises it.
+                if (visitor.options.interpret_system_instructions && visitor.ir.current_location.VFPDisabled()) {
+                    should_continue = visitor.InterpretThisInstruction();
+                } else {
+                    should_continue = vfp_decoder->get().call(visitor, *arm_instruction);
+                }
             } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(*arm_instruction)) {
                 should_continue = asimd_decoder->get().call(visitor, *arm_instruction);
             } else if (const auto decoder = DecodeArm<TranslatorVisitor>(*arm_instruction)) {
@@ -62,7 +69,8 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
 
         visitor.ir.current_location = visitor.ir.current_location.AdvancePC(4);
         block.CycleCount() += ticks_for_instruction;
-    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step);
+    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step
+             && (options.max_block_instructions == 0 || ++block_instructions < options.max_block_instructions));
 
     if (visitor.cond_state == ConditionalState::Translating || visitor.cond_state == ConditionalState::Trailing || single_step) {
         if (should_continue) {
@@ -93,7 +101,12 @@ bool TranslateSingleArmInstruction(IR::Block& block, LocationDescriptor descript
     const u64 ticks_for_instruction = 1;
 
     if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(arm_instruction)) {
-        should_continue = vfp_decoder->get().call(visitor, arm_instruction);
+        // Blossom: FPEXC.EN = 0 makes every VFP instruction undefined; the interpreter raises it.
+        if (visitor.options.interpret_system_instructions && visitor.ir.current_location.VFPDisabled()) {
+            should_continue = visitor.InterpretThisInstruction();
+        } else {
+            should_continue = vfp_decoder->get().call(visitor, arm_instruction);
+        }
     } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(arm_instruction)) {
         should_continue = asimd_decoder->get().call(visitor, arm_instruction);
     } else if (const auto decoder = DecodeArm<TranslatorVisitor>(arm_instruction)) {

@@ -168,6 +168,9 @@ struct UserConfig {
     /// same integer and update the pointer attribute pair atomically.
     /// If the configured value is 3, all pointers will be forcefully aligned to 8 bytes.
     int page_table_pointer_mask_bits = 0;
+    /// Blossom: when set, bit 0 of a page table entry marks the page read-only: reads use the
+    /// pointer, writes fall back to the MemoryWrite* callbacks. Requires page_table_pointer_mask_bits >= 1.
+    bool page_table_read_only_bit0 = false;
     /// Determines if we should detect memory accesses via page_table that straddle are
     /// misaligned. Accesses that straddle page boundaries will fallback to the relevant
     /// memory callback.
@@ -209,6 +212,14 @@ struct UserConfig {
     /// Hint instructions would cause ExceptionRaised to be called with the appropriate
     /// argument.
     bool hook_hint_instructions = false;
+
+    /// Blossom (LLE): see TranslationOptions::interpret_system_instructions. When set, system
+    /// instructions and unpredictable/undefined encodings call InterpreterFallback instead of
+    /// ExceptionRaised, and only MRC of the c13 thread ID registers goes through coprocessors[15].
+    bool interpret_system_instructions = false;
+
+    /// Blossom: maximum number of guest instructions per translated block (0 = no limit).
+    std::size_t max_block_instructions = 0;
 
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define

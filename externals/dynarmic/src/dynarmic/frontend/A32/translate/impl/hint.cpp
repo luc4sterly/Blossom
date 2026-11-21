@@ -27,6 +27,9 @@ bool TranslatorVisitor::arm_PLD_reg(bool /*add*/, bool R, Reg /*n*/, Imm<5> /*im
 }
 
 bool TranslatorVisitor::arm_SEV() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }
@@ -43,6 +46,9 @@ bool TranslatorVisitor::arm_SEVL() {
 }
 
 bool TranslatorVisitor::arm_WFE() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }
@@ -51,6 +57,9 @@ bool TranslatorVisitor::arm_WFE() {
 }
 
 bool TranslatorVisitor::arm_WFI() {
+    if (options.interpret_system_instructions) {
+        return InterpretThisInstruction();
+    }
     if (!options.hook_hint_instructions) {
         return true;
     }

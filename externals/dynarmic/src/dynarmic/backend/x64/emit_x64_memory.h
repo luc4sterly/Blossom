@@ -69,10 +69,10 @@ void EmitDetectMisalignedVAddr(BlockOfCode& code, EmitContext& ctx, size_t bitsi
 }
 
 template<typename EmitContext>
-Xbyak::RegExp EmitVAddrLookup(BlockOfCode& code, EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr);
+Xbyak::RegExp EmitVAddrLookup(BlockOfCode& code, EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr, bool is_write = false);
 
 template<>
-[[maybe_unused]] Xbyak::RegExp EmitVAddrLookup<A32EmitContext>(BlockOfCode& code, A32EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr) {
+[[maybe_unused]] Xbyak::RegExp EmitVAddrLookup<A32EmitContext>(BlockOfCode& code, A32EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr, bool is_write) {
     const Xbyak::Reg64 page = ctx.reg_alloc.ScratchGpr();
     const Xbyak::Reg32 tmp = ctx.conf.absolute_offset_page_table ? page.cvt32() : ctx.reg_alloc.ScratchGpr().cvt32();
 
@@ -84,6 +84,11 @@ template<>
     code.shr(tmp, static_cast<int>(page_bits));
 
     code.mov(page, qword[r14 + tmp.cvt64() * sizeof(void*)]);
+    if (is_write && ctx.conf.page_table_read_only_bit0) {
+        // Blossom: bit 0 of an entry marks a read-only page; writes there take the callback path.
+        code.test(page.cvt8(), 1);
+        code.jnz(abort, code.T_NEAR);
+    }
     if (ctx.conf.page_table_pointer_mask_bits == 0) {
         code.test(page, page);
     } else {
@@ -99,7 +104,7 @@ template<>
 }
 
 template<>
-[[maybe_unused]] Xbyak::RegExp EmitVAddrLookup<A64EmitContext>(BlockOfCode& code, A64EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr) {
+[[maybe_unused]] Xbyak::RegExp EmitVAddrLookup<A64EmitContext>(BlockOfCode& code, A64EmitContext& ctx, size_t bitsize, Xbyak::Label& abort, Xbyak::Reg64 vaddr, bool) {
     const size_t valid_page_index_bits = ctx.conf.page_table_address_space_bits - page_bits;
     const size_t unused_top_bits = 64 - ctx.conf.page_table_address_space_bits;
 

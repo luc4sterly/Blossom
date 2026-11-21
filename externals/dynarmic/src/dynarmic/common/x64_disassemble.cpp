@@ -5,11 +5,23 @@
 
 #include "dynarmic/common/x64_disassemble.h"
 
+#ifndef DYNARMIC_NO_ZYDIS
 #include <Zydis/Zydis.h>
+#endif
 #include <fmt/printf.h>
 #include <mcl/stdint.hpp>
 
 namespace Dynarmic::Common {
+
+#ifdef DYNARMIC_NO_ZYDIS
+void DumpDisassembledX64(const void* ptr, size_t size) {
+    fmt::print("(x64 disassembly unavailable: built without zydis) {} bytes at {}\n", size, ptr);
+}
+
+std::vector<std::string> DisassembleX64(const void*, size_t) {
+    return {};
+}
+#else
 
 void DumpDisassembledX64(const void* ptr, size_t size) {
     ZydisDecoder decoder;
@@ -54,4 +66,5 @@ std::vector<std::string> DisassembleX64(const void* ptr, size_t size) {
 
     return result;
 }
+#endif
 }  // namespace Dynarmic::Common
