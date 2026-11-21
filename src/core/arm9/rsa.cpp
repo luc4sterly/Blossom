@@ -282,7 +282,11 @@ void RSA::do_rsa_op()
     //headers no real key can sign (the NAND NCSD header), already *is* the block. In development
     //mode, treat it as if the exponent were 1 so the verifier sees the block it expects. Real
     //signatures are never touched, because they already decrypt to a valid block.
-    if (accept_self_signed && !looks_like_pkcs1_block(gmp_msg) && looks_like_pkcs1_block(gmp_b))
+    //Only signature checks qualify: they use the public exponent 0x10001. Process9 also runs a
+    //private-exponent operation on a padded block to derive keyX 0x25 and keyY 0x2F, and that
+    //result must be the real one.
+    if (accept_self_signed && mpz_cmp_ui(gmp_e, 0x10001) == 0 && !looks_like_pkcs1_block(gmp_msg)
+        && looks_like_pkcs1_block(gmp_b))
     {
         if (!self_signed_logged)
         {

@@ -94,6 +94,65 @@ int main()
     check(run(rsa, true, mod, msg, expected), "single-word exponent after clearing the slot");
     check(run(rsa, false, mod, msg, expected), "full exponent again after a short one");
 
+    //--dev-unsigned must not touch an operation with a private-size exponent, even when the input
+    //is a padded block (Process9's key derivation does exactly that).
+    {
+        uint8_t block[0x100];
+        memset(block, 0xFF, sizeof(block));
+        block[0] = 0x00;
+        block[1] = 0x01;
+        block[0xDF] = 0x00;
+        mpz_t b, d, out;
+        mpz_inits(b, d, out, NULL);
+        mpz_import(b, 0x100, 1, 1, 1, 0, block);
+        mpz_urandomb(d, st, 2040);
+        mpz_setbit(d, 2039);
+        mpz_powm(out, b, d, n);
+        uint8_t dbytes[0x100], expected_priv[0x100];
+        to_bytes(d, dbytes);
+        to_bytes(out, expected_priv);
+
+        rsa.set_accept_self_signed(true);
+        const uint32_t cnt = 1 << 9;
+        rsa.write32(0x1000B000, cnt);
+        rsa.write32(0x1000B100, 0);
+        write_be(rsa, 0x1000B200, dbytes);
+        write_be(rsa, 0x1000B400, mod);
+        write_be(rsa, 0x1000B800, block);
+        rsa.write32(0x1000B000, cnt | 1);
+        uint8_t got[0x100];
+        for (int i = 0; i < 0x100; i += 4)
+        {
+            uint32_t v = rsa.read32(0x1000B800 + i);
+            got[i] = v >> 24;
+            got[i + 1] = v >> 16;
+            got[i + 2] = v >> 8;
+            got[i + 3] = v;
+        }
+        check(memcmp(got, expected_priv, 0x100) == 0, "--dev-unsigned leaves private-exponent ops alone");
+
+        //...but still accepts a self-signed block under the public exponent
+        uint8_t self_signed[0x100];
+        memcpy(self_signed, block, 0x100);
+        mpz_t ss;
+        mpz_init(ss);
+        mpz_import(ss, 0x100, 1, 1, 1, 0, self_signed);
+        bool real_is_pkcs1 = false;
+        {
+            mpz_t res;
+            mpz_init(res);
+            mpz_powm(res, ss, e, n);
+            uint8_t rb[0x100];
+            to_bytes(res, rb);
+            real_is_pkcs1 = rb[0] == 0 && rb[1] == 1 && rb[2] == 0xFF;
+            mpz_clear(res);
+        }
+        check(!real_is_pkcs1 && run(rsa, true, mod, self_signed, self_signed),
+              "--dev-unsigned accepts a self-signed block with exponent 0x10001");
+        rsa.set_accept_self_signed(false);
+        mpz_clears(b, d, out, ss, NULL);
+    }
+
     mpz_clears(n, m, e, r, NULL);
     gmp_randclear(st);
     return failures ? 1 : 0;
