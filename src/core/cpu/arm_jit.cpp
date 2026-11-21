@@ -161,12 +161,11 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
     conf.optimizations &= ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
 
     //BLOSSOM_JIT_INTERP=<lo>-<hi> (hex, ARM11 only): run guest code in that range through the
-    //interpreter instead of compiling it; 0 turns it off. The default covers the user code at
-    //$00100200 that the HOME Menu reaches on frame 252, where one dynarmic compile never ends and
-    //eats GBs of RAM (root cause still under investigation).
+    //interpreter instead of compiling it (debug aid, off by default). Each instruction there still
+    //costs a dynarmic dispatch and an empty block, so it is slow.
     if (!is_arm9)
     {
-        uint32_t lo = 0x00100200, hi = 0x001002FF;
+        uint32_t lo = 0, hi = 0;
         if (const char* env = getenv("BLOSSOM_JIT_INTERP"))
         {
             char* end = nullptr;
