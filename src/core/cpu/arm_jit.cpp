@@ -138,6 +138,15 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
             fprintf(stderr, "[ARM%d] JIT debug switches: %d\n", cpu.id, safe);
     }
 
+    //BLOSSOM_JIT_OPT=<mask>: dynarmic optimizations to keep (OptimizationFlag bits: 1 block
+    //linking, 2 return stack buffer, 4 fast dispatch, 8 get/set elimination, 16 constant
+    //propagation, 32 misc IR). Debug aid to find which one breaks something.
+    if (const char* env = getenv("BLOSSOM_JIT_OPT"))
+    {
+        conf.optimizations = static_cast<Dynarmic::OptimizationFlag>(strtoul(env, nullptr, 0));
+        fprintf(stderr, "[ARM%d] JIT optimizations: $%X\n", cpu.id, (unsigned)conf.optimizations);
+    }
+
     jit = std::make_unique<A32::Jit>(conf);
     reset();
 }

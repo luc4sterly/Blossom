@@ -99,6 +99,10 @@ Variables de diagnóstico:
   Con `BLOSSOM_PROFILE=2` añade registros, ciclos e instrucciones interpretadas de cada núcleo.
 * `BLOSSOM_JIT_SAFE=<n>` (depuración) apaga partes del JIT, sumando: 1 = sin tabla de páginas
   (toda la memoria por callbacks), 2 = una instrucción por bloque, 4 = sin optimizaciones.
+  `BLOSSOM_JIT_OPT=<máscara>` elige qué optimizaciones de dynarmic quedan (1 enlazado de bloques,
+  2 RSB, 4 fast dispatch, 8 get/set, 16 propagación de constantes, 32 IR misc).
+  `BLOSSOM_TRACE_MMIO=2` añade todas las escrituras del ARM11 a memoria (con el JIT, junto a
+  `BLOSSOM_JIT_SAFE=1`).
 * `BLOSSOM_TRACE_SVC=1` vuelve a sacar la traza de SVC, IPC e interrupciones por stdout.
   Viene apagada porque escribir en consola en cada SVC frena más que el propio emulador.
 * `BLOSSOM_TRACE_MMIO=1` saca por stderr cada acceso de los ARM11 a registros de E/S (los bucles

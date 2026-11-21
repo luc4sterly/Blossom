@@ -28,13 +28,25 @@ static bool trace_svc_enabled()
 //address). Accesses repeated in a polling loop are counted instead of printed. Both CPU backends go
 //through here, so interpreter and JIT logs can be compared line by line. The ARM9 is left out on
 //purpose: it writes console keys to the AES engine, and these logs get shared.
+static int trace_mmio_level()
+{
+    static const int level = [] {
+        const char* env = getenv("BLOSSOM_TRACE_MMIO");
+        return env ? atoi(env) : 0;
+    }();
+    return level;
+}
+
 static bool trace_mmio_enabled()
 {
-    static const bool enabled = [] {
-        const char* env = getenv("BLOSSOM_TRACE_MMIO");
-        return env && env[0] && env[0] != '0';
-    }();
-    return enabled;
+    return trace_mmio_level() >= 1;
+}
+
+//BLOSSOM_TRACE_MMIO=2 also logs every ARM11 write to memory (virtual address, lower-case 'w').
+//JIT writes that hit the page table skip ARM_CPU::write*, so use it with BLOSSOM_JIT_SAFE=1.
+static bool trace_writes_enabled()
+{
+    return trace_mmio_level() >= 2;
 }
 
 static void trace_mmio(int id, char kind, int bits, uint32_t addr, uint32_t value)
@@ -957,6 +969,8 @@ uint64_t ARM_CPU::read64(uint32_t addr)
 
 void ARM_CPU::write8(uint32_t addr, uint8_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 8, addr, value);
     uint64_t mem = (uint64_t)tlb_map[addr / 4096];
     if (!(mem & (1ULL << 61ULL)))
     {
@@ -985,6 +999,8 @@ void ARM_CPU::write8(uint32_t addr, uint8_t value)
 
 void ARM_CPU::write16(uint32_t addr, uint16_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 16, addr, value);
     if (id == 9 && (addr & 0x1))
         EmuException::die("[ARM9] Unaligned write16 $%08X: $%04X", addr, value);
     if ((addr & 0xFFF) > 0xFFE)
@@ -1017,6 +1033,8 @@ void ARM_CPU::write16(uint32_t addr, uint16_t value)
 
 void ARM_CPU::write32(uint32_t addr, uint32_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 32, addr, value);
     if (id == 9 && (addr & 0x3))
         EmuException::die("[ARM9] Unaligned write32 $%08X: $%08X", addr, value);
     if ((addr & 0xFFF) > 0xFFC)
