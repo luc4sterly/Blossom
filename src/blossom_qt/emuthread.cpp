@@ -37,6 +37,7 @@ void EmuThread::run()
             printf("%s\n", error.what());
             e.print_state();
             fflush(stdout);
+            fflush(stderr);
             emit emu_error(error.what());
             quit = true;
             break;

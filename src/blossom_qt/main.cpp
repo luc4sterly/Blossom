@@ -18,6 +18,12 @@ int main(int argc, char** argv)
     const char* flush_env = getenv("BLOSSOM_LOG_FLUSH");
     if (!(flush_env && flush_env[0] == '1'))
         setvbuf(stdout, stdout_buffer, _IOFBF, sizeof(stdout_buffer));
+    //stderr too: the profiler and traces write ~30 pieces a frame, and unbuffered writes to a file
+    //redirected by the launcher (Start-Process on Windows) cost ~200 ms a frame. Emulator::run
+    //flushes once per frame and the watchdog flushes its own reports.
+    static char stderr_buffer[1 << 18];
+    if (!(flush_env && flush_env[0] == '1'))
+        setvbuf(stderr, stderr_buffer, _IOFBF, sizeof(stderr_buffer));
 
     QApplication a(argc, argv);
     QApplication::setApplicationName("Blossom");

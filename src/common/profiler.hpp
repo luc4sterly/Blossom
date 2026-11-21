@@ -68,6 +68,9 @@ void end_frame(int frame);
 void claim_thread();
 //Resident memory of the process in MB, or -1 if unknown
 long resident_mb();
+//Committed private memory in MB on Windows (what Task Manager calls "commit"), -1 elsewhere.
+//A leak can grow it while the working set stays small.
+long private_mb();
 //Name of a bucket, and a racy snapshot of the bucket stack (innermost last) for the watchdog thread
 const char* bucket_name(int bucket);
 int stack_snapshot(int* out, int max);

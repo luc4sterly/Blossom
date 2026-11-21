@@ -22,6 +22,18 @@ namespace Profiler
 {
 
 //Resident memory of the process in MB, or -1 if unknown
+long private_mb()
+{
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+        return (long)(pmc.PrivateUsage >> 20);
+    return -1;
+#else
+    return -1;
+#endif
+}
+
 long resident_mb()
 {
 #ifdef _WIN32
@@ -223,7 +235,11 @@ void end_frame(int frame)
             std::fprintf(stderr, " | %s %llu", counter_names[i], (unsigned long long)counters[i]);
         counters[i] = 0;
     }
-    std::fprintf(stderr, " | ram %ld MB\n", resident_mb());
+    long priv = private_mb();
+    if (priv >= 0)
+        std::fprintf(stderr, " | ram %ld MB (private %ld MB)\n", resident_mb(), priv);
+    else
+        std::fprintf(stderr, " | ram %ld MB\n", resident_mb());
 
     //Where "other" went: the three biggest gaps between buckets, and the longest single gap
     struct Gap { double ms; int from, to; } top[3] = {};

@@ -401,7 +401,7 @@ void Emulator::run()
                 const char* env = getenv("BLOSSOM_MAX_RAM_MB");
                 return env ? atol(env) : 4096L;
             }();
-            long mb = Profiler::resident_mb();
+            long mb = std::max(Profiler::resident_mb(), Profiler::private_mb());
             if (max_mb > 0 && mb > max_mb)
                 EmuException::die("[Emulator] Using %ld MB of memory (limit %ld MB) in frame %d, stopping",
                                   mb, max_mb, frames);
@@ -495,6 +495,7 @@ void Emulator::run()
             arm11[i].print_jit_stats();
         arm9.print_jit_stats();
     }
+    fflush(stderr);
     if (prof_report)
         Profiler::leave();
     frames++;
