@@ -213,6 +213,30 @@ void Emulator::reset(bool cold_boot)
     scheduler.set_clockrate_xtensa(XTENSA_CLOCKRATE);
 }
 
+uint8_t* Emulator::phys_ptr(uint32_t addr, uint32_t len)
+{
+    uint64_t end = (uint64_t)addr + len;
+    if (addr >= 0x18000000 && end <= 0x18600000)
+        return vram + (addr - 0x18000000);
+    if (addr >= 0x20000000 && end <= 0x20000000ULL + fcram_size)
+        return fcram + (addr - 0x20000000);
+    if (addr >= 0x1FF80000 && end <= 0x20000000)
+        return axi_RAM + (addr - 0x1FF80000);
+    return nullptr;
+}
+
+bool Emulator::set_gpu_renderer(const char* name)
+{
+    return gpu.set_renderer(name);
+}
+
+void Emulator::apply_gpu_renderer_env()
+{
+    const char* env = GPU::renderer_env();
+    if (env)
+        gpu.set_renderer(env);
+}
+
 bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
 {
     if ((arm11_jit || arm9_jit) && !ARM_CPU::jit_available())

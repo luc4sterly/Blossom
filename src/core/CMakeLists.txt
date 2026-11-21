@@ -6,6 +6,7 @@ add_library(blossom_core STATIC
     arm11/dsp_reg.hpp
     arm11/gpu.cpp
     arm11/gpu.hpp
+    arm11/gpu_hw.cpp
     arm11/gpu_floats.hpp
     arm11/hash.cpp
     arm11/hash.hpp
@@ -83,6 +84,11 @@ if (ENABLE_JIT)
     target_sources(blossom_core PRIVATE cpu/arm_jit.cpp cpu/arm_jit.hpp)
     target_link_libraries(blossom_core PRIVATE dynarmic)
     target_compile_definitions(blossom_core PUBLIC BLOSSOM_HAS_JIT=1)
+endif()
+
+if (ENABLE_VULKAN)
+    target_link_libraries(blossom_core PRIVATE blossom_video_vulkan)
+    target_compile_definitions(blossom_core PUBLIC BLOSSOM_HAS_VULKAN=1)
 endif()
 
 find_package(Threads REQUIRED)

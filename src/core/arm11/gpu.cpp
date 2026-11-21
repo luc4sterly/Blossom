@@ -82,6 +82,7 @@ GPU::GPU(Emulator* e, Scheduler* scheduler, MPCore_PMR* pmr) : e(e), scheduler(s
 
 GPU::~GPU()
 {
+    hw_shutdown();
     //vram is passed by the emulator, so no need to delete
     delete[] top_screen;
     delete[] bottom_screen;
@@ -125,6 +126,15 @@ bool GPU::trace_enabled()
     static const bool enabled = [] {
         const char* env = getenv("BLOSSOM_TRACE_GPU");
         return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool trace_commands()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_TRACE_GPU");
+        return env && atoi(env) >= 2;
     }();
     return enabled;
 }
@@ -555,6 +565,10 @@ void GPU::do_command_engine_dma(uint64_t index)
             write_cmd_register(cmd_id, extra_params[i], param_mask);
         }
     }
+
+    //Hardware renderer: write what this list drew back to emulated memory
+    if (hw)
+        hw_end_session();
 }
 
 void GPU::do_memfill(int index)
@@ -609,7 +623,9 @@ void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
 
     param = ctx.regs[reg];
 
-    printf("[GPU] Write command $%04X ($%08X)\n", reg, param);
+    //One line per register write is thousands of lines a frame; only with BLOSSOM_TRACE_GPU=2
+    if (trace_commands())
+        printf("[GPU] Write command $%04X ($%08X)\n", reg, param);
 
     //Texture combiner regs
     if ((reg >= 0x0C0 && reg < 0x0E0) || (reg >= 0x0F0 && reg < 0x0FD))
@@ -1492,6 +1508,12 @@ void GPU::process_tri(Vertex &v0, Vertex &v1, Vertex &v2)
         }
     }
 
+    if (hw)
+    {
+        hw_polygon(output_list);
+        return;
+    }
+
     viewport_transform(output_list[0]);
     viewport_transform(output_list[1]);
 
@@ -1594,13 +1616,8 @@ bool GPU::get_fill_rule_bias(Vertex &vtx, Vertex &line1, Vertex &line2)
                                                        (line2.pos[1] - line1.pos[1]);
 }
 
-void GPU::rasterize_tri(Vertex &v0, Vertex &v1, Vertex &v2)
+void GPU::compute_texcomb_range()
 {
-    Profiler::Scope prof_scope(Profiler::GPU_RASTER);
-    //The triangle rasterization code uses an approach with barycentric coordinates
-    //Clear explanation can be read below:
-    //https://fgiesen.wordpress.com/2013/02/06/the-barycentric-conspirac/
-
     //Check if texture combiners are unused - this lets us save time by not looping through all six of them
     ctx.texcomb_start = 0;
     for (int i = 0; i < 6; i++)
@@ -1625,6 +1642,16 @@ void GPU::rasterize_tri(Vertex &v0, Vertex &v1, Vertex &v2)
         ctx.texcomb_end = i + 1;
         break;
     }
+}
+
+void GPU::rasterize_tri(Vertex &v0, Vertex &v1, Vertex &v2)
+{
+    Profiler::Scope prof_scope(Profiler::GPU_RASTER);
+    //The triangle rasterization code uses an approach with barycentric coordinates
+    //Clear explanation can be read below:
+    //https://fgiesen.wordpress.com/2013/02/06/the-barycentric-conspirac/
+
+    compute_texcomb_range();
 
     std::swap(v1, v2);
 
@@ -2123,6 +2150,15 @@ void GPU::tex_lookup(int index, int coord_index, RGBA_Color &tex_color, Vertex &
     //Texcoords are vertically flipped
     v = ctx.tex_height[index] - 1 - v;
 
+    decode_texel(index, u, v, tex_color);
+}
+
+//Reads texel (u, v) of texture unit index, v counted from the start of the texture in memory.
+//Shared by the software rasterizer and the Vulkan texture upload (gpu_hw.cpp).
+void GPU::decode_texel(int index, int u, int v, RGBA_Color &tex_color)
+{
+    tex_color = {0, 0, 0, 0};
+    int width = ctx.tex_width[index];
     uint32_t addr = ctx.tex_addr[index];
     uint32_t texel;
 

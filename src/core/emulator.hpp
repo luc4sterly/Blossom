@@ -157,6 +157,16 @@ class Emulator
 
         void arm11_send_events(int id);
 
+        //Host pointer for len bytes of physical memory at addr (VRAM, FCRAM or AXI WRAM), or
+        //nullptr if the range is not all in one of them. Used by the hardware renderer.
+        uint8_t* phys_ptr(uint32_t addr, uint32_t len);
+        //GPU renderer: "software" or "vulkan". Returns false if Vulkan could not start.
+        bool set_gpu_renderer(const char* name);
+        //Reads BLOSSOM_GPU and applies it if set.
+        void apply_gpu_renderer_env();
+
+        GPU& gpu_for_tests() { return gpu; }
+
         uint8_t* get_top_buffer();
         uint8_t* get_bottom_buffer();
         void set_pad(uint16_t pad);

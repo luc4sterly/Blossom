@@ -91,6 +91,12 @@ bool EmuThread::boot_emulator(QString cart_path)
         e.set_cpu_backend(true, true);
     e.apply_cpu_backend_env();
 
+    //GPU renderer: saved setting, then --gpu, then BLOSSOM_GPU. Vulkan falls back to software.
+    QString renderer = Settings::gpu_renderer_override.isEmpty() ? Settings::gpu_renderer
+                                                                : Settings::gpu_renderer_override;
+    e.set_gpu_renderer(renderer.toStdString().c_str());
+    e.apply_gpu_renderer_env();
+
     if (!e.mount_nand(Settings::nand_path.toStdString()))
     {
         emit boot_error("Failed to load NAND image.");

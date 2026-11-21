@@ -52,3 +52,12 @@ endif()
 add_executable(blossom-rsa-tests rsa_test.cpp)
 target_link_libraries(blossom-rsa-tests PRIVATE blossom_core blossom_warnings)
 add_test(NAME rsa COMMAND blossom-rsa-tests)
+
+# Vulkan rasterizer vs software rasterizer on random triangles (needs a Vulkan device, e.g. lavapipe;
+# skipped with code 77 if there is none)
+if (ENABLE_VULKAN)
+    add_executable(blossom-gpu-tests gpu_test.cpp)
+    target_link_libraries(blossom-gpu-tests PRIVATE blossom_core blossom_warnings)
+    add_test(NAME gpu-vulkan-matches-software COMMAND blossom-gpu-tests)
+    set_tests_properties(gpu-vulkan-matches-software PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+endif()

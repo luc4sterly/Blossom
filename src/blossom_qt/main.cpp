@@ -35,6 +35,8 @@ int main(int argc, char** argv)
         {"autoload-nocart", "Starts emulation immediately without a cartridge."},
         {"cpu", "CPU backend for this run: jit (default), jit11 (JIT on ARM11 only) or interp "
                 "(interpreter, for debugging and comparing).", "backend"},
+        {"gpu", "GPU renderer for this run: vulkan (default) or software (Corgi's rasterizer, "
+                "for comparing).", "renderer"},
         {"dev-unsigned", "Development: accept the self-signed NCSD header of a synthetic NAND "
                          "built with tools/mknand. Real signatures are still checked."}
     });
@@ -62,6 +64,7 @@ int main(int argc, char** argv)
 
     Settings::dev_unsigned = parser.isSet("dev-unsigned");
     Settings::cpu_backend_override = parser.value("cpu");
+    Settings::gpu_renderer_override = parser.value("gpu");
 
     //The order of this is important - we need to save settings before EmuWindow is constructed.
     //Otherwise, the settings window will have the old settings in the UI.

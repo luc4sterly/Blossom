@@ -1,6 +1,7 @@
 #ifndef GPU_HPP
 #define GPU_HPP
 #include <cstdint>
+#include <vector>
 #include "core/arm11/gpu_floats.hpp"
 #include "core/arm11/vector_math.hpp"
 
@@ -355,7 +356,9 @@ class GPU
         void rasterize_half_tri(float24 x0, float24 x1, int y0, int y1, Vertex &x_step,
                                 Vertex &y_step, Vertex &init, float24 step_x0, float24 step_x1);
 
+        void compute_texcomb_range();
         void tex_lookup(int index, int coord_index, RGBA_Color& tex_color, Vertex& vtx);
+        void decode_texel(int index, int u, int v, RGBA_Color& tex_color);
         void decode_etc1(RGBA_Color& tex_color, int u, int v, uint64_t data);
         void get_tex0(RGBA_Color& tex_color, Vertex& vtx);
         void get_tex1(RGBA_Color& tex_color, Vertex& vtx);
@@ -412,7 +415,28 @@ class GPU
             uint64_t fb_select[2], fb_addr[2], fill_writes[2];
         } stats;
         void note_unknown(char kind, uint32_t addr, uint32_t value);
+
+        //Hardware (Vulkan) renderer, see gpu_hw.cpp. nullptr = software rasterizer.
+        struct HwRenderer;
+        HwRenderer* hw = nullptr;
+        void hw_polygon(std::vector<Vertex>& poly);
+        void hw_end_session();
+        void hw_shutdown();
+        uint32_t hw_read_fb(uint32_t addr, int size);
+        void hw_write_fb(uint32_t addr, uint32_t value, int size);
     public:
+        //"software" or "vulkan". Returns false (and keeps the software renderer) if Vulkan
+        //can't start. Can be called at any time between command lists.
+        bool set_renderer(const char* name);
+        const char* renderer_name() const;
+        //BLOSSOM_GPU environment variable, or nullptr
+        static const char* renderer_env();
+
+        //Test hooks (src/tests/gpu_test.cpp): drive the rasterizer without a command list
+        void test_write_reg(int reg, uint32_t value) { write_cmd_register(reg, value, 0xF); }
+        void test_triangle(Vertex v0, Vertex v1, Vertex v2) { process_tri(v0, v1, v2); }
+        void test_end_list() { if (hw) hw_end_session(); }
+
         GPU(Emulator* e, Scheduler* scheduler, MPCore_PMR* pmr);
         ~GPU();
 

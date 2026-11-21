@@ -32,11 +32,13 @@ CMakeModules/  módulos de CMake (FindGMP)
 Dependencias en Ubuntu 24.04 o Debian 12+:
 
 ```sh
-sudo apt install cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev libboost-dev
+sudo apt install cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev libboost-dev libvulkan-dev
 ```
 
 Boost solo hace falta por las cabeceras (lo usa dynarmic). En Arch es `boost` y en MSYS2 UCRT64
-`mingw-w64-ucrt-x86_64-boost`.
+`mingw-w64-ucrt-x86_64-boost`. Para el renderer Vulkan hacen falta las cabeceras y el loader de
+Vulkan: `libvulkan-dev` en Ubuntu, `vulkan-devel` en Arch y `mingw-w64-ucrt-x86_64-vulkan-devel` en
+MSYS2 UCRT64. Sin ellos se compila igual, solo con el renderer por software.
 
 Compilar y pasar los tests:
 
@@ -56,6 +58,10 @@ Opciones de CMake:
 | `ENABLE_TESTS`  | `ON`        | Compila el runner de CPU y registra CTest |
 | `ENABLE_WERROR` | `OFF`       | Trata los warnings como errores           |
 | `ENABLE_JIT`    | `ON` (x86-64) | Compila el JIT dynarmic para ARM9 y ARM11 |
+| `ENABLE_VULKAN` | `ON`        | Compila el renderer Vulkan (se apaga solo si no encuentra Vulkan) |
+
+Los shaders del renderer Vulkan van ya compilados a SPIR-V en `src/video_core/renderer_vulkan/*.spv.h`.
+Si tocas `shaders/*.vert|frag`, regenera con `tools/gen_vk_shaders.sh` (necesita `glslangValidator`).
 
 Windows y macOS llegarán más adelante.
 
@@ -92,6 +98,18 @@ Por defecto los dos tipos de núcleo (ARM11 y ARM9) van por el JIT. Se puede cam
 
 Si algo arranca con el intérprete y no con el JIT, prueba `jit11` y luego `interp` para acotarlo.
 
+### GPU: Vulkan o software
+
+Por defecto la GPU (PICA200) dibuja con Vulkan: el vertex shader, el ensamblado de primitivas y el
+clipping siguen en la CPU, y la rasterización, las texturas, los combinadores (TEV), el alpha test,
+el blending, las logic ops y el depth/stencil van a la tarjeta gráfica. Si Vulkan no arranca, se
+usa el rasterizador por software de Corgi3DS. Se elige en *Options → Settings → GPU*, con `--gpu`
+o con `BLOSSOM_GPU` (que manda): `vulkan` o `software`.
+
+* `BLOSSOM_VK_DEVICE=<n>` elige la tarjeta (el log lista `[Vulkan] Device n: ...` al arrancar).
+* `BLOSSOM_VK_VALIDATION=1` activa las capas de validación de Vulkan si están instaladas.
+* `blossom-gpu-tests` (en CTest) dibuja triángulos aleatorios con los dos renderers y compara VRAM.
+
 Variables de diagnóstico:
 
 * `BLOSSOM_PROFILE=1` imprime en stderr, por frame, el tiempo que se lleva cada parte
@@ -106,6 +124,8 @@ Variables de diagnóstico:
   2 RSB, 4 fast dispatch, 8 get/set, 16 propagación de constantes, 32 IR misc).
   `BLOSSOM_TRACE_MMIO=2` añade todas las escrituras del ARM11 a memoria (con el JIT, junto a
   `BLOSSOM_JIT_SAFE=1`).
+* `BLOSSOM_TRACE_GPU=1` resume la actividad de la GPU cada 60 frames; `=2` además saca cada
+  escritura a registros de la GPU por stdout (antes salía siempre y frenaba mucho).
 * `BLOSSOM_TRACE_SVC=1` vuelve a sacar la traza de SVC, IPC e interrupciones por stdout.
   Viene apagada porque escribir en consola en cada SVC frena más que el propio emulador.
 * `BLOSSOM_TRACE_MMIO=1` saca por stderr cada acceso de los ARM11 a registros de E/S (los bucles
@@ -130,7 +150,8 @@ Variables de diagnóstico:
 
 1. **Build moderno que arranca GodMode9** (C++20, CMake, Qt 6, CI en Linux) ← ahora
 2. JIT [dynarmic](https://github.com/azahar-emu/dynarmic) para ARM9 y ARM11 ← hecho, en pruebas
-3. Separar la GPU en `video_core` con renderers OpenGL/Vulkan (basados en Azahar)
+3. GPU por hardware con Vulkan (`src/video_core`, basado en Azahar) ← primer paso hecho: rasterizador.
+   Siguiente: vertex shader por JIT y caché de superficies sin ida y vuelta a VRAM
 4. DSP con [teakra](https://github.com/wwylele/teakra)
 5. Home Menu y juegos a velocidad jugable, en Old 3DS y New 3DS
 
@@ -142,7 +163,9 @@ Blossom se distribuye bajo la **GNU GPL v3** (ver [LICENSE.txt](LICENSE.txt)).
   frontend. Importado del commit
   [`38d3d38`](https://github.com/PSI-Rockin/Corgi3DS/commit/38d3d3809bf57922aa40034e28fdf1d6e6856ad0).
 * **Azahar** y el proyecto Citra (GPLv3): referencia de arquitectura, y fuente de los
-  componentes que se vayan incorporando en próximos hitos.
+  componentes que se vayan incorporando en próximos hitos. El renderer Vulkan
+  (`src/video_core/renderer_vulkan`) sigue la estructura del `renderer_vulkan` de Azahar
+  (caché de pipelines por estado fijo, caché de texturas, shader de fragmentos del PICA).
 * [dynarmic](https://github.com/azahar-emu/dynarmic) (0BSD), el JIT ARM, en
   `externals/dynarmic` con parches para LLE (ver
   [`externals/dynarmic/BLOSSOM.md`](externals/dynarmic/BLOSSOM.md)), junto con fmt, mcl,
