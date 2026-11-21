@@ -37,6 +37,7 @@ class RSA
         //Development mode for synthetic NANDs (tools/mknand): accept "self-signed" blocks.
         bool accept_self_signed = false;
         bool self_signed_logged = false;
+        int rsa_op_count = 0;
 
         void do_rsa_op();
         void convert_to_bignum(uint8_t* src, mpz_t dest);

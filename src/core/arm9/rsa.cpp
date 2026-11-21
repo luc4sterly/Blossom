@@ -34,6 +34,7 @@ void RSA::reset()
     memset(&RSA_CNT, 0, sizeof(RSA_CNT));
     memset(keys, 0, sizeof(keys));
     msg_ctr = 0;
+    rsa_op_count = 0;
 }
 
 uint8_t RSA::read8(uint32_t addr)
@@ -107,12 +108,9 @@ void RSA::write8(uint32_t addr, uint8_t value)
         //if (RSA_CNT.big_endian)
             //value = bswp32(value);
 
-        key->exp[key->exp_ctr] = value;
-        key->exp_ctr++;
-        if (key->exp_ctr >= 0x100)
-        {
-            key->exp_ctr = 0;
-        }
+        //The exponent FIFO shifts in from the low end, so a short exponent works.
+        memmove(key->exp, key->exp + 1, 0xFF);
+        key->exp[0xFF] = value;
         return;
     }
 
@@ -165,6 +163,15 @@ void RSA::write32(uint32_t addr, uint32_t value)
             case 0:
                 printf("[RSA] Write32 key%d cnt: $%08X\n", index, value);
                 keys[index].write_protect = value & (1 << 1);
+                //Clearing the "key set" bit starts a new key: the exponent FIFO and the modulus
+                //write position start over. Software such as Process9 then writes the exponent as
+                //a single word (0x10001), not as the full 0x100 bytes.
+                if (!(value & 0x1) && !keys[index].write_protect)
+                {
+                    memset(keys[index].exp, 0, sizeof(keys[index].exp));
+                    keys[index].exp_ctr = 0;
+                    keys[index].mod_ctr = 0;
+                }
                 return;
         }
     }
@@ -176,12 +183,10 @@ void RSA::write32(uint32_t addr, uint32_t value)
         if (!RSA_CNT.big_endian)
             value = bswp32(value);
 
-        *(uint32_t*)&key->exp[key->exp_ctr] = value;
-        key->exp_ctr += 4;
-        if (key->exp_ctr >= 0x100)
-        {
-            key->exp_ctr = 0;
-        }
+        //The exponent FIFO shifts in from the low end: writing the full 0x100 bytes gives the same
+        //result as before, and a single word (e.g. 0x00010001) gives exponent 0x10001.
+        memmove(key->exp, key->exp + 4, 0xFC);
+        memcpy(&key->exp[0xFC], &value, 4);
         return;
     }
 
@@ -270,6 +275,9 @@ void RSA::do_rsa_op()
     mpz_powm(gmp_msg, gmp_b, gmp_e, gmp_m);
     printf("Result: %s\n", mpz_get_str(NULL, 16, gmp_msg));
 
+    rsa_op_count++;
+    bool accepted_self_signed = false;
+
     //A real signature decrypts to a PKCS#1 block. A "self-signed" one, written by tools/mknand for
     //headers no real key can sign (the NAND NCSD header), already *is* the block. In development
     //mode, treat it as if the exponent were 1 so the verifier sees the block it expects. Real
@@ -283,7 +291,15 @@ void RSA::do_rsa_op()
             self_signed_logged = true;
         }
         mpz_set(gmp_msg, gmp_b);
+        accepted_self_signed = true;
     }
+
+    //Public information only: which keyslot, the exponent and modulus sizes, and whether the
+    //result is a PKCS#1 signature block.
+    fprintf(stderr, "[RSA] op #%d keyslot %d: exponent %zu bits, modulus %zu bits, result %s%s\n",
+            rsa_op_count, RSA_CNT.keyslot, mpz_sizeinbase(gmp_e, 2), mpz_sizeinbase(gmp_m, 2),
+            looks_like_pkcs1_block(gmp_msg) ? "is a PKCS#1 block" : "is not a PKCS#1 block",
+            accepted_self_signed ? " (self-signed, --dev-unsigned)" : "");
 
     convert_from_bignum(gmp_msg, msg);
     int9->assert_irq(22);
