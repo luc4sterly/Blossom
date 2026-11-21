@@ -304,6 +304,11 @@ bool Emulator::parse_essentials()
     return emmc.parse_essentials(otp_free);
 }
 
+void Emulator::set_dev_unsigned(bool enabled)
+{
+    rsa.set_accept_self_signed(enabled);
+}
+
 bool Emulator::mount_nand(std::string file_name)
 {
     return emmc.mount_nand(file_name);

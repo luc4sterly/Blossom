@@ -12,6 +12,23 @@ RSA::RSA(Interrupt9* int9) : int9(int9)
 
 }
 
+void RSA::set_accept_self_signed(bool accept)
+{
+    accept_self_signed = accept;
+    self_signed_logged = false;
+}
+
+//True if x, as a 2048-bit big-endian block, starts with 00 01 FF (PKCS#1 v1.5 signature padding)
+static bool looks_like_pkcs1_block(mpz_t x)
+{
+    mpz_t top;
+    mpz_init(top);
+    mpz_tdiv_q_2exp(top, x, 2048 - 24);
+    bool result = mpz_cmp_ui(top, 0x01FF) == 0;
+    mpz_clear(top);
+    return result;
+}
+
 void RSA::reset()
 {
     memset(&RSA_CNT, 0, sizeof(RSA_CNT));
@@ -252,6 +269,21 @@ void RSA::do_rsa_op()
 
     mpz_powm(gmp_msg, gmp_b, gmp_e, gmp_m);
     printf("Result: %s\n", mpz_get_str(NULL, 16, gmp_msg));
+
+    //A real signature decrypts to a PKCS#1 block. A "self-signed" one, written by tools/mknand for
+    //headers no real key can sign (the NAND NCSD header), already *is* the block. In development
+    //mode, treat it as if the exponent were 1 so the verifier sees the block it expects. Real
+    //signatures are never touched, because they already decrypt to a valid block.
+    if (accept_self_signed && !looks_like_pkcs1_block(gmp_msg) && looks_like_pkcs1_block(gmp_b))
+    {
+        if (!self_signed_logged)
+        {
+            fprintf(stderr, "[RSA] --dev-unsigned: accepting a self-signed block (keyslot %d)\n",
+                    RSA_CNT.keyslot);
+            self_signed_logged = true;
+        }
+        mpz_set(gmp_msg, gmp_b);
+    }
 
     convert_from_bignum(gmp_msg, msg);
     int9->assert_irq(22);

@@ -21,7 +21,9 @@ int main(int argc, char** argv)
         {"nand", "NAND dump. Must be dumped from latest version of GodMode9.", "nand"},
         {"sd", "SD image dump. Optional, but required for sighaxed NANDs.", "sd"},
         {"autoload", "3DS cartridge. Starts emulation immediately.", "cart"},
-        {"autoload-nocart", "Starts emulation immediately without a cartridge."}
+        {"autoload-nocart", "Starts emulation immediately without a cartridge."},
+        {"dev-unsigned", "Development: accept the self-signed NCSD header of a synthetic NAND "
+                         "built with tools/mknand. Real signatures are still checked."}
     });
 
     parser.process(a.arguments());
@@ -44,6 +46,8 @@ int main(int argc, char** argv)
 
     if (!sd_path.isEmpty())
         Settings::sd_path = sd_path;
+
+    Settings::dev_unsigned = parser.isSet("dev-unsigned");
 
     //The order of this is important - we need to save settings before EmuWindow is constructed.
     //Otherwise, the settings window will have the old settings in the UI.

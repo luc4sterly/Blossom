@@ -34,6 +34,10 @@ class RSA
         uint8_t msg[0x100];
         int msg_ctr;
 
+        //Development mode for synthetic NANDs (tools/mknand): accept "self-signed" blocks.
+        bool accept_self_signed = false;
+        bool self_signed_logged = false;
+
         void do_rsa_op();
         void convert_to_bignum(uint8_t* src, mpz_t dest);
         void convert_from_bignum(mpz_t src, uint8_t* dest);
@@ -41,6 +45,7 @@ class RSA
         RSA(Interrupt9* int9);
 
         void reset();
+        void set_accept_self_signed(bool accept);
 
         uint8_t read8(uint32_t addr);
         uint32_t read32(uint32_t addr);
