@@ -261,6 +261,12 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 for d in mknand.CTRNAND_DIRS:
                     self.assertTrue(vol.isdir(d), d)
                 self.assertTrue(vol.exists('/dbs/import.db'))
+                movable = vol.readbytes('/private/movable.sed')
+                self.assertEqual((len(movable), movable[:4]), (0x120, b'SEED'))
+                cmd = vol.readbytes(f'{base}/cmd/00000001.cmd')
+                crypto = mknand.make_crypto(b9_path)
+                crypto.setup_sd_key(movable)
+                self.assertEqual(cmd, mknand.build_cmd(mknand._cmd_inputs(fake), crypto))
                 self.assertEqual(mknand.verify_title_db(vol.readbytes('/dbs/title.db'), result.titles), [])
                 vol.close()
 
@@ -309,6 +315,66 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 self.assertIn('max files 0x40', title_line)
         finally:
             cia_mod.CIAReader = real
+
+
+    def test_fix_titles_writes_cmd_and_movable(self):
+        import pyctr.type.cia as cia_mod
+        real = cia_mod.CIAReader
+        cia_mod.CIAReader = _FakeCIA
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_b9 = random.Random(9).randbytes(0x10000)
+                b9_path = os.path.join(tmp, 'fake_boot9.bin')
+                with open(b9_path, 'wb') as f:
+                    f.write(fake_b9)
+                pyctr_engine.BOOT9_PROT_HASH = hashlib.sha256(fake_b9[0x8000:]).hexdigest()
+                cia = os.path.join(tmp, '0004013000008002.cia')
+                open(cia, 'wb').close()
+                out = os.path.join(tmp, 'nand.bin')
+                mknand.build_nand(out, b9_path, b'FIRM' + bytes(0x100), 'fix', [cia], log=lambda *_: None)
+                # Like an image built before cmd files existed
+                m = mknand.MountedCTRNAND(out, b9_path, writable=True)
+                m.fs.remove('/title/00040130/00008002/content/cmd/00000001.cmd')
+                m.fs.remove('/private/movable.sed')
+                m.save()
+                m.close()
+
+                self.assertEqual(mknand.fix_titles(out, b9_path, [cia], log=lambda *_: None), 1)
+                m = mknand.MountedCTRNAND(out, b9_path)
+                try:
+                    movable = m.fs.readbytes('/private/movable.sed')
+                    cmd = m.fs.readbytes('/title/00040130/00008002/content/cmd/00000001.cmd')
+                    m.crypto.setup_sd_key(movable)
+                    self.assertEqual(cmd, mknand.build_cmd(mknand._cmd_inputs(_FakeCIA(cia)), m.crypto))
+                finally:
+                    m.close()
+        finally:
+            cia_mod.CIAReader = real
+
+
+@unittest.skipIf(pyctr_engine is None, 'pyctr is not installed')
+class CmdFormat(unittest.TestCase):
+    def test_layout_and_cmacs(self):
+        from Cryptodome.Hash import CMAC
+        from Cryptodome.Cipher import AES
+        from pyctr.crypto import CryptoEngine
+        crypto = CryptoEngine(setup_b9_keys=False)
+        key = bytes(range(16))
+        crypto.set_normal_key(0x30, key)
+        heads = [bytes([i]) * 0x100 for i in range(3)]
+        cmd = mknand.build_cmd([(0, '0000000a', heads[0]), (2, '00000005', heads[2])], crypto)
+        cmd_id, count, installed, one = struct.unpack_from('<IIII', cmd, 0)
+        self.assertEqual((cmd_id, count, installed, one), (1, 3, 2, 1))
+        mac = lambda d: CMAC.new(key, d, ciphermod=AES).digest()
+        self.assertEqual(cmd[0x10:0x20], mac(cmd[:0x10]))
+        ids = [cmd[0x20 + 4 * i:0x24 + 4 * i] for i in range(3)]
+        self.assertEqual(ids, [b'\x0a\0\0\0', b'\xff' * 4, b'\x05\0\0\0'])
+        self.assertEqual(cmd[0x2C:0x34], b'\x05\0\0\0\x0a\0\0\0')  # sorted
+        cmacs = cmd[0x34:]
+        self.assertEqual(len(cmacs), 0x30)
+        self.assertEqual(cmacs[0:0x10], mac(hashlib.sha256(heads[0] + bytes(4) + b'\x0a\0\0\0').digest()))
+        self.assertEqual(cmacs[0x10:0x20], b'MISSING CONTENT!')
+        self.assertEqual(cmacs[0x20:], mac(hashlib.sha256(heads[2] + b'\x02\0\0\0\x05\0\0\0').digest()))
 
 
 if __name__ == '__main__':

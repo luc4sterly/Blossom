@@ -61,6 +61,20 @@ una vez:
     --cias /ruta/a/11.17.0-50E.OLD/
 ```
 
+### Archivos .cmd y movable.sed
+
+Cada título lleva `content/cmd/00000001.cmd`, la lista de contenidos instalados que Process9
+consulta antes de abrir el `.tmd`. Su AES-CMAC usa el keyslot 0x30, cuya keyY sale de
+`/private/movable.sed`; mknand crea uno falso (sin CMAC) con keyY aleatoria. Para una imagen
+hecha antes de esto:
+
+```sh
+.venv/bin/python tools/mknand/mknand.py --boot9 boot9.bin --fix-titles nand_synth.bin \
+    --cias /ruta/a/11.17.0-50E.OLD/
+```
+
+Si Process9 rechaza los .cmd, prueba `--cmd-keyslot 0x0B` (la clave de las bases de datos de NAND).
+
 Opciones útiles:
 
 - `--cias RUTA...`: CIA sueltos o carpetas con CIA. Los títulos TWL (`0004800x…`) se saltan de momento.

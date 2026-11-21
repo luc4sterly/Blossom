@@ -298,13 +298,69 @@ def _extdata_id(cia, boot9_path: str) -> int:
         return 0
 
 
+# AM's content metadata: /title/<hi>/<lo>/content/cmd/<cmd id>.cmd. Process9 reads it to find the
+# installed contents of a NAND title. Layout and CMAC inputs from ihaveamac/custom-install (MIT).
+CMD_MISSING_ID = b'\xff\xff\xff\xff'
+CMD_MISSING_CMAC = b'MISSING CONTENT!'
+CMD_KEYSLOT = 0x30  # pyctr's CMACSDNAND: keyY comes from movable.sed
+
+
+def build_movable(rng: random.Random) -> bytes:
+    """A 0x120-byte movable.sed without CMAC: "SEED", fake LocalFriendCodeSeed_B, random keyY."""
+    sed = bytearray(0x120)
+    sed[0:4] = b'SEED'
+    sed[0x08:0x108] = rng.randbytes(0x100)   # LFCS RSA signature (fake, only matters online)
+    sed[0x108:0x110] = rng.randbytes(8)      # LFCS data
+    sed[0x110:0x120] = rng.randbytes(0x10)   # keyY for keyslots 0x30/0x34/0x3A
+    return bytes(sed)
+
+
+def build_cmd(contents: list[tuple[int, str, bytes]], crypto, keyslot: int = CMD_KEYSLOT,
+              cmd_id: int = 1) -> bytes:
+    """
+    Build a .cmd file. `contents` holds (content index, content id as hex, the content's NCCH
+    header at 0x100..0x200). `crypto` needs `keyslot` ready (movable.sed loaded for 0x30).
+    """
+    by_index = {}
+    for cindex, cid_hex, ncch_head in contents:
+        id_bytes = int(cid_hex, 16).to_bytes(4, 'little')
+        c = crypto.create_cmac_object(keyslot)
+        c.update(hashlib.sha256(ncch_head + cindex.to_bytes(4, 'little') + id_bytes).digest())
+        by_index[cindex] = (id_bytes, c.digest())
+    count = max(by_index) + 1 if by_index else 0
+    ids, cmacs = [], []
+    for i in range(count):
+        if i in by_index:
+            ids.append(by_index[i][0])
+            cmacs.append(by_index[i][1])
+        else:
+            ids.append(CMD_MISSING_ID)
+            cmacs.append(CMD_MISSING_CMAC)
+    installed = sorted((v[0] for v in by_index.values()), key=lambda b: int.from_bytes(b, 'little'))
+    header = struct.pack('<IIII', cmd_id, count, len(installed), 1)
+    c = crypto.create_cmac_object(keyslot)
+    c.update(header)
+    return header + c.digest() + b''.join(ids) + b''.join(installed) + b''.join(cmacs)
+
+
+def _cmd_inputs(cia) -> list[tuple[int, str, bytes]]:
+    out = []
+    for record in cia.content_info:
+        with cia.open_raw_section(record.cindex) as src:
+            src.seek(0x100)
+            out.append((record.cindex, record.id, src.read(0x100)))
+    return out
+
+
 def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print,
-                   write_files: bool = True) -> list[InstalledTitle]:
+                   write_files: bool = True, cmd_crypto=None,
+                   cmd_keyslot: int = CMD_KEYSLOT) -> list[InstalledTitle]:
     """
     Install CTR titles from CIAs into a mounted CTRNAND file system (a pyfs-style object).
 
     Each title goes to /title/<high>/<low>/content/ as 00000000.tmd plus one <content id>.app per
-    content in the CIA, with the title-key layer removed (NCCH encryption stays, as on a console).
+    content in the CIA, with the title-key layer removed (NCCH encryption stays, as on a console),
+    and content/cmd/00000001.cmd when `cmd_crypto` (with movable.sed loaded) is given.
     Returns what dbs/title.db needs for each title. With write_files=False (volume may be None)
     it only computes that.
     """
@@ -338,6 +394,10 @@ def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print,
                             dst.write(chunk)
                 total += record.size
                 names.append(name)
+            if write_files and cmd_crypto is not None:
+                volume.makedirs(f'{base}/cmd', recreate=True)
+                with volume.openbin(f'{base}/cmd/00000001.cmd', 'w') as dst:
+                    dst.write(build_cmd(_cmd_inputs(cia), cmd_crypto, cmd_keyslot))
             tmd = cia.tmd
             on_disk = sum(roundup(r.size, 0x8000) for r in cia.content_info)
             with cia.open_raw_section(CIASection.TitleMetadata) as src:
@@ -483,6 +543,43 @@ def update_dbs(image: str, boot9_path: str, cia_paths: list[str], log=print) -> 
     return after - before
 
 
+def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
+               keyslot: int = CMD_KEYSLOT) -> int:
+    """
+    Write content/cmd/00000001.cmd for every installed title in an existing image, and
+    /private/movable.sed if there is none (its keyY is the CMAC key). Returns how many cmds.
+    """
+    from pyctr.type.cia import CIAReader
+    m = MountedCTRNAND(image, boot9_path, writable=True)
+    written = 0
+    try:
+        path = m.find('/private', 'movable.sed') if m.fs.isdir('/private') else None
+        if path is None:
+            m.fs.makedirs('/private', recreate=True)
+            movable = build_movable(random.Random(os.urandom(32)))
+            with m.fs.openbin('/private/movable.sed', 'w') as f:
+                f.write(movable)
+            log('created /private/movable.sed')
+        else:
+            movable = m.fs.readbytes(path)
+            log(f'using {path} ({len(movable):#x} bytes)')
+        m.crypto.setup_sd_key(movable)
+        for cia_path in cia_paths:
+            with CIAReader(cia_path, crypto=make_crypto(boot9_path), load_contents=False) as cia:
+                tid = cia.tmd.title_id
+                base = f'/title/{tid[0:8]}/{tid[8:16]}/content'
+                if is_twl_title(tid) or not m.fs.isdir(base):
+                    continue
+                m.fs.makedirs(f'{base}/cmd', recreate=True)
+                with m.fs.openbin(f'{base}/cmd/00000001.cmd', 'w') as f:
+                    f.write(build_cmd(_cmd_inputs(cia), m.crypto, keyslot))
+                written += 1
+        m.save()
+    finally:
+        m.close()
+    return written
+
+
 def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x400000) -> None:
     """
     Copy a plaintext FAT16 volume into an encrypted partition file object: the FAT area and every
@@ -536,7 +633,8 @@ class BuildResult:
 
 
 def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
-               cia_paths: list[str] | None = None, log=print) -> BuildResult:
+               cia_paths: list[str] | None = None, log=print,
+               cmd_keyslot: int = CMD_KEYSLOT) -> BuildResult:
     from pyctr.type.nand import NAND, NANDSection
 
     check_firm(firm)
@@ -598,8 +696,13 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
             nonlocal titles
             for d in CTRNAND_DIRS:
                 volume.makedirs(d, recreate=True)
+            movable = build_movable(rng)
+            with volume.openbin('/private/movable.sed', 'w') as f:
+                f.write(movable)
+            crypto.setup_sd_key(movable)
             if cia_paths:
-                titles = install_titles(volume, cia_paths, boot9_path, log)
+                titles = install_titles(volume, cia_paths, boot9_path, log, cmd_crypto=crypto,
+                                        cmd_keyslot=cmd_keyslot)
             write_title_databases(volume, [t.info for t in titles], crypto)
 
         volumes = [
@@ -664,7 +767,7 @@ def verify_titles(nand, path: str, titles: list[InstalledTitle]) -> list[str]:
         try:
             for t in titles:
                 base = f'/title/{t.title_id[0:8]}/{t.title_id[8:16]}/content'
-                for name in ['00000000.tmd'] + t.contents:
+                for name in ['00000000.tmd', 'cmd/00000001.cmd'] + t.contents:
                     if not volume.exists(f'{base}/{name}'):
                         problems.append(f'missing {base}/{name}')
                 size = sum(volume.getsize(f'{base}/{n}') for n in t.contents if volume.exists(f'{base}/{n}'))
@@ -773,19 +876,35 @@ def main(argv=None) -> int:
                    help='do not build: list the databases in an image\'s CTRNAND and check their CMACs')
     p.add_argument('--update-dbs', metavar='IMAGE',
                    help='do not build: add the --cias titles to the title.db AM created on first boot')
+    p.add_argument('--fix-titles', metavar='IMAGE',
+                   help='do not build: write content/cmd/00000001.cmd for the --cias titles already '
+                        'in an image (and /private/movable.sed if missing)')
+    p.add_argument('--cmd-keyslot', default='0x30',
+                   help='AES-CMAC keyslot for .cmd files (default 0x30; 0x0B to try the NAND DB key)')
     p.add_argument('--explain', metavar='IMAGE',
                    help='do not build: print the hashes boot9 computes for an existing image, '
                         'to compare with a SHA log from Blossom')
     if argv is None:
         argv = sys.argv[1:]
-    if '--inspect-dbs' in argv or '--update-dbs' in argv:
+    if '--inspect-dbs' in argv or '--update-dbs' in argv or '--fix-titles' in argv:
         e = argparse.ArgumentParser()
         e.add_argument('--boot9', required=True)
         e.add_argument('--inspect-dbs')
         e.add_argument('--update-dbs')
+        e.add_argument('--fix-titles')
+        e.add_argument('--cmd-keyslot', default='0x30')
         e.add_argument('--cias', nargs='+')
         eargs, _ = e.parse_known_args(argv)
         try:
+            if eargs.fix_titles:
+                if not eargs.cias:
+                    print('error: --fix-titles needs --cias', file=sys.stderr)
+                    return 1
+                n = fix_titles(eargs.fix_titles, eargs.boot9, find_cias(eargs.cias),
+                               keyslot=int(eargs.cmd_keyslot, 0))
+                print(f'wrote {n} cmd files')
+                if not (eargs.update_dbs or eargs.inspect_dbs):
+                    return 0
             if eargs.update_dbs:
                 if not eargs.cias:
                     print('error: --update-dbs needs --cias', file=sys.stderr)
@@ -817,7 +936,8 @@ def main(argv=None) -> int:
             firm = extract_native_firm(args.native_firm_cia, args.boot9)
 
         cias = find_cias(args.cias) if args.cias else []
-        result = build_nand(args.out, args.boot9, firm, args.seed, cias)
+        result = build_nand(args.out, args.boot9, firm, args.seed, cias,
+                            cmd_keyslot=int(args.cmd_keyslot, 0))
         if cias:
             print(f'installed {len(result.titles)} titles into CTRNAND')
         device_id = struct.unpack_from('<I', result.otp_plain, 4)[0]
