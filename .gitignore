@@ -19,3 +19,6 @@ compile_commands.json
 
 # Runtime logs written by the emulator
 pxi_log.txt
+__pycache__/
+*.pyc
+.venv/
