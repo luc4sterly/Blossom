@@ -1,0 +1,21 @@
+# Build output
+/build*/
+/out/
+CMakeUserPresets.json
+compile_commands.json
+
+# Editors
+.vscode/
+.idea/
+*.user
+.DS_Store
+
+# Never commit console dumps or keys
+*.bin
+*.3ds
+*.cia
+*.img
+!src/tests/*.elf
+
+# Runtime logs written by the emulator
+pxi_log.txt
