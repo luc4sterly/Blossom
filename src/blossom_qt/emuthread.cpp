@@ -31,6 +31,7 @@ void EmuThread::run()
             printf("[EmuThread] Error occurred, stopping emulation...\n");
             printf("%s\n", error.what());
             e.print_state();
+            fflush(stdout);
             emit emu_error(error.what());
             quit = true;
             break;
