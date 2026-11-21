@@ -72,3 +72,10 @@ EFFICIENCY"). Each segment keeps a `std::set` of every block that ever covered i
 copies those sets when it splits segments. With the same addresses recompiled for many contexts
 (every 3DS process has .text at $00100000) this grew by GBs a second. Blossom remembers each live
 block's range and subtracts it on invalidation.
+
+## LocationDescriptor hash (ir/location_descriptor.h, frontend/A32/a32_location_descriptor.h)
+
+`std::hash<u64>` is the identity on libstdc++ and tsl::robin_map's power-of-two policy indexes with
+the low bits, which hold the PC. The same PC in many contexts (bits 32+) fell into one probe run,
+and `rehash_on_extreme_load` doubled `patch_information` until it took GBs (the HOME Menu leak).
+Both hashes now go through the splitmix64 finalizer.
