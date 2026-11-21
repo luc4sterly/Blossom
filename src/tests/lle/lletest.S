@@ -61,7 +61,9 @@ _start:
     bl test_asid
     bl test_abort
     bl test_smc
+    bl test_smc_nocache
     bl test_excl
+    bl test_long
 
     ldr r0, =str_done
     bl print
@@ -411,6 +413,30 @@ test_smc:
     pop {r4-r5, pc}
 
 @ ---------------------------------------------------------------------------------------------
+@ Code rewritten with no cache maintenance (the caches are off, as in the boot ROMs and early
+@ kernel): the next call has to run the new instruction.
+test_smc_nocache:
+    push {r4-r5, lr}
+    ldr r5, =SMC_FUNC + 0x100
+    ldr r0, =0xE3A00007     @ mov r0, #7
+    ldr r1, =0xE12FFF1E     @ bx lr
+    stmia r5, {r0, r1}
+    mov r0, #0
+    mcr p15, 0, r0, c7, c5, 0
+    blx r5
+    mov r4, r0
+    ldr r0, =0xE3A00008     @ mov r0, #8
+    str r0, [r5]
+    blx r5
+    cmp r4, #7
+    cmpeq r0, #8
+    moveq r1, #1
+    movne r1, #0
+    ldr r0, =str_smc2
+    bl result
+    pop {r4-r5, pc}
+
+@ ---------------------------------------------------------------------------------------------
 @ LDREX/STREX: a clean pair succeeds, a STREX after CLREX fails.
 test_excl:
     push {lr}
@@ -438,6 +464,21 @@ test_excl:
 unused_handler:
     b unused_handler
 
+@ ---------------------------------------------------------------------------------------------
+@ A straight run of unconditional instructions longer than the JIT's block cap: the block has to
+@ end and continue in the next one.
+test_long:
+    push {lr}
+    mov r1, #0
+    .rept 200
+    add r1, r1, #1
+    .endr
+    cmp r1, #200
+    movne r1, #0
+    ldr r0, =str_long
+    bl result
+    pop {pc}
+
     .ltorg
 
 vector_table:
@@ -460,7 +501,9 @@ str_mmu:    .asciz "MMU "
 str_asid:   .asciz "ASID "
 str_abort:  .asciz "ABORT "
 str_smc:    .asciz "SMC "
+str_smc2:   .asciz "SMC2 "
 str_excl:   .asciz "EXCL "
+str_long:   .asciz "LONG "
 str_done:   .asciz "DONE"
     .balign 4
 

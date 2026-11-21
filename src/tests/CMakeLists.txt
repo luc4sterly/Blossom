@@ -17,8 +17,8 @@ add_test(NAME thumbwrestler
 set_tests_properties(thumbwrestler PROPERTIES TIMEOUT 120)
 
 # lletest: system-level ARM11 checks (exceptions, banked registers, CP15, lazy VFP, MMU and
-# address space switches, data aborts, self-modifying code, LDREX/STREX). Source in lle/.
-set(LLETEST_PASS "SVC OK BANKED OK VFP OK TLS OK.*MMU OK.*ASID OK.*ABORT OK SMC OK EXCL OK DONE")
+# address space switches, data aborts, self-modifying code, LDREX/STREX, blocks over the JIT cap). Source in lle/.
+set(LLETEST_PASS "SVC OK BANKED OK VFP OK TLS OK.*MMU OK.*ASID OK.*ABORT OK SMC OK SMC2 OK EXCL OK LONG OK DONE")
 add_test(NAME lletest
     COMMAND blossom-cpu-tests --core arm11 "${CMAKE_CURRENT_SOURCE_DIR}/lletest.elf")
 set_tests_properties(lletest PROPERTIES PASS_REGULAR_EXPRESSION "${LLETEST_PASS}" TIMEOUT 120)

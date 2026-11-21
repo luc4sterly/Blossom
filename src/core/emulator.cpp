@@ -320,6 +320,22 @@ void Emulator::run()
         }
     }
     Profiler::end_frame(frames);
+    if (Profiler::enabled)
+    {
+        //Where each core is at the end of the frame: a core stuck in a loop shows the same PCs
+        //frame after frame. PC is the next instruction (the interpreter's PC minus 4, or 2 in Thumb).
+        auto core_state = [](ARM_CPU& cpu) {
+            PSR_Flags* cpsr = cpu.get_CPSR();
+            fprintf(stderr, " $%08X/%02X%s%s", cpu.get_PC() - (cpsr->thumb ? 2 : 4), cpsr->mode,
+                    cpsr->thumb ? "T" : "", cpu.is_halted() ? " halt" : "");
+        };
+        fprintf(stderr, "[CPU] frame %d: arm11", frames);
+        for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
+            core_state(arm11[i]);
+        fprintf(stderr, " | arm9");
+        core_state(arm9);
+        fprintf(stderr, "\n");
+    }
     frames++;
 }
 
