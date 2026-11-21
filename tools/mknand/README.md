@@ -112,3 +112,14 @@ probar en Blossom con tu propio `boot9.bin`.
 
 Nota: genera la imagen en el sistema de archivos de Linux (por ejemplo `~/` en WSL2), no en
 `/mnt/c`. Usa archivos dispersos de casi 1 GB y en NTFS van mucho más lentos.
+
+## Diagnóstico del motor AES
+
+`aeslog.py` repite las líneas `[AES]` de un log de Blossom (CNT, KEYCNT, XFIFO, YFIFO y
+"Generated key") con las mismas reglas que `aes.cpp`. Después dice si la keyX que escribió el
+firmware y cada clave normal generada coinciden con las de pyctr. Solo imprime MATCH o MISMATCH,
+y en caso de MISMATCH, qué orden de bytes habría coincidido. Nunca imprime claves.
+
+```sh
+.venv/bin/python tools/mknand/aeslog.py blossom.log --slot 0x25
+```

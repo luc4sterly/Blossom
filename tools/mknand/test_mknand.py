@@ -407,5 +407,33 @@ class CmdFormat(unittest.TestCase):
         self.assertEqual(cmacs[0x20:], mac(hashlib.sha256(heads[2] + b'\x02\0\0\0\x05\0\0\0').digest()))
 
 
+@unittest.skipIf(pyctr_engine is None, 'pyctr is not installed')
+class AESLog(unittest.TestCase):
+    def _log(self, key_x: bytes, key_y: bytes, normal: bytes) -> list[str]:
+        # CNT bits 23|25: Blossom then stores each FIFO word little-endian, in order
+        words = lambda b: [int.from_bytes(b[i:i + 4], 'little') for i in range(0, 16, 4)]
+        lines = ['[AES] Write CNT: $02800000', '[AES] KEYCNT: $A5']
+        lines += [f'[AES] Write XFIFO: ${w:08X}' for w in words(key_x)]
+        lines += [f'[AES] Write YFIFO: ${w:08X}' for w in words(key_y)]
+        lines.append('[AES] Generated key: ' + normal.hex())
+        return lines
+
+    def test_good_and_bad_keys(self):
+        import aeslog
+        from pyctr.crypto import CryptoEngine
+        real_x = random.Random(1).getrandbits(128)
+        key_y = random.Random(2).randbytes(16)
+        normal = CryptoEngine.keygen_manual(real_x, int.from_bytes(key_y, 'big'))
+        good = aeslog.check(self._log(real_x.to_bytes(16, 'big'), key_y, normal), 0x25, real_x)
+        self.assertEqual(len(good), 2)
+        self.assertTrue(good[0].endswith('MATCH'), good)
+        self.assertNotIn('MISMATCH', good[1])
+
+        swapped = real_x.to_bytes(16, 'big')[::-1]
+        bad = aeslog.check(self._log(swapped, key_y, normal), 0x25, real_x)
+        self.assertIn('would match with bytes reversed', bad[0])
+        self.assertIn('scrambler(real keyX, keyY) MATCH', bad[1])
+
+
 if __name__ == '__main__':
     unittest.main()
