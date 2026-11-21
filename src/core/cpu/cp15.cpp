@@ -3,6 +3,7 @@
 #include "core/cpu/arm.hpp"
 #include "core/cpu/cp15.hpp"
 #include "core/cpu/mmu.hpp"
+#include "common/log.hpp"
 
 CP15::CP15(int id, ARM_CPU* cpu, MMU* mmu) : id(id), cpu(cpu), mmu(mmu)
 {

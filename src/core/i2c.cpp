@@ -6,6 +6,7 @@
 #include "core/i2c.hpp"
 #include "core/scheduler.hpp"
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 #define itob(i) ((i)/10*16 + (i)%10)    /* u_char to BCD */
 

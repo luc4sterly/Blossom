@@ -1,6 +1,7 @@
 #include <cstring>
 #include <cstdio>
 #include "core/arm11/wifi_timers.hpp"
+#include "common/log.hpp"
 
 WiFi_Timers::WiFi_Timers()
 {

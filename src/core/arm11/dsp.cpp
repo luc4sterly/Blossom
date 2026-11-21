@@ -6,6 +6,7 @@
 #include "core/arm11/dsp.hpp"
 #include "core/arm11/dsp_interpreter.hpp"
 #include "core/arm11/signextend.hpp"
+#include "common/log.hpp"
 
 DSP::DSP(Scheduler* scheduler) : scheduler(scheduler)
 {

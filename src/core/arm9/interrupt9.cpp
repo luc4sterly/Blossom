@@ -1,6 +1,7 @@
 #include <cstdio>
 #include "core/cpu/arm.hpp"
 #include "core/arm9/interrupt9.hpp"
+#include "common/log.hpp"
 
 Interrupt9::Interrupt9(ARM_CPU* arm9) : arm9(arm9)
 {

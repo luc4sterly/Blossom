@@ -11,7 +11,7 @@ using namespace std;
 int main(int argc, char** argv)
 {
     //The emulator core prints a lot of debug chatter to stdout (GPU command lists, PXI, interrupt
-    //controller...). Line-buffered or console output turns each line into a system call, which
+    //controller...). It is off unless BLOSSOM_LOG=1 (common/log.hpp). When on, line-buffered or console output turns each line into a system call, which
     //cost a big share of every frame on Windows. A large buffer keeps it cheap; BLOSSOM_LOG_FLUSH=1
     //restores line buffering for live logs.
     static char stdout_buffer[1 << 20];

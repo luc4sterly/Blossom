@@ -1,5 +1,6 @@
 #include "common/common.hpp"
 #include "core/cpu/vfp.hpp"
+#include "common/log.hpp"
 
 VFP::VFP()
 {

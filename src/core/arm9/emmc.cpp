@@ -4,6 +4,7 @@
 #include "core/arm9/dma9.hpp"
 #include "core/arm9/emmc.hpp"
 #include "core/arm9/interrupt9.hpp"
+#include "common/log.hpp"
 
 #define ISTAT_CMDEND 0x1
 #define ISTAT_DATAEND 0x4

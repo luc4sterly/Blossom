@@ -12,6 +12,7 @@
 #include "core/emulator.hpp"
 #include "core/scheduler.hpp"
 #include "common/common.hpp"
+#include "common/log.hpp"
 
 // 8x8 Z-Order coordinate from 2D coordinates
 // https://github.com/citra-emu/citra/blob/aca55d0378f1fadb73f1ad54826f19e029a0674f/src/video_core/utils.h#L12

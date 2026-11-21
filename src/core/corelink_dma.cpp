@@ -1,6 +1,7 @@
 #include <cstring>
 #include "common/common.hpp"
 #include "core/corelink_dma.hpp"
+#include "common/log.hpp"
 
 #define printf(fmt, ...) (void)(0)
 

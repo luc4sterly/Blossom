@@ -5,6 +5,7 @@
 #include "core/arm11/mpcore_pmr.hpp"
 #include "core/timers.hpp"
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 Timers::Timers(Interrupt9* int9, MPCore_PMR* pmr, Emulator* e) : int9(int9), pmr(pmr), e(e)
 {

@@ -5,6 +5,7 @@
 #include "core/arm9/cartridge.hpp"
 #include "core/arm9/dma9.hpp"
 #include "core/arm9/interrupt9.hpp"
+#include "common/log.hpp"
 
 Cartridge::Cartridge(DMA9* dma9, Interrupt9* int9) : dma9(dma9), int9(int9)
 {

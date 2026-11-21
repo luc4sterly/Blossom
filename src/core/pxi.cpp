@@ -5,6 +5,7 @@
 #include "core/arm9/interrupt9.hpp"
 #include "core/p9_hle.hpp"
 #include "core/pxi.hpp"
+#include "common/log.hpp"
 
 #define LOG_P9_HLE
 

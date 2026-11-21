@@ -4,6 +4,7 @@
 #include "core/corelink_dma.hpp"
 #include "core/scheduler.hpp"
 #include "core/arm11/wifi.hpp"
+#include "common/log.hpp"
 
 //#define LLE_WIFI
 

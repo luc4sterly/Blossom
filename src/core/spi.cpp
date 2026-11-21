@@ -4,6 +4,7 @@
 #include "core/spi.hpp"
 
 #include "common/common.hpp"
+#include "common/log.hpp"
 
 SPI::SPI()
 {

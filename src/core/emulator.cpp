@@ -9,6 +9,7 @@
 #include <chrono>
 #include "common/common.hpp"
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 Emulator::Emulator() :
     arm9(this, 9, &arm9_cp15, nullptr),

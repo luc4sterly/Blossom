@@ -1,5 +1,6 @@
 #include "common/common.hpp"
 #include "core/arm11/hash.hpp"
+#include "common/log.hpp"
 
 #define printf(fmt,...) (void)(0)
 

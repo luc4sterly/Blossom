@@ -13,6 +13,7 @@
 #include "core/cpu/arm_jit.hpp"
 #endif
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 //The SVC/IPC trace reads guest memory on every SVC and floods stdout, which ends up costing more
 //than the JIT saves. Enable it with BLOSSOM_TRACE_SVC=1.

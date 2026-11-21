@@ -112,6 +112,11 @@ o con `BLOSSOM_GPU` (que manda): `vulkan` o `software`.
 
 Variables de diagnóstico:
 
+* `BLOSSOM_LOG=1` vuelve a sacar por stdout los mensajes de depuración del núcleo (EMMC, NDMA,
+  AES, PXI, trazas de SVC…). Vienen apagados porque eran cientos de miles de líneas por minuto y
+  se comían buena parte de cada frame. Las trazas `BLOSSOM_TRACE_SVC=1`, `BLOSSOM_TRACE_GPU=2` y las
+  de `BLOSSOM_SKIP_SETUP` que salen por stdout también necesitan `BLOSSOM_LOG=1`.
+
 * `BLOSSOM_PROFILE=1` imprime en stderr, por frame, el tiempo que se lleva cada parte
   (ARM11, ARM9, GPU, DSP…), contadores del JIT y dónde está cada núcleo (línea `[CPU]`).
   Con `BLOSSOM_PROFILE=2` añade registros, ciclos e instrucciones interpretadas de cada núcleo.

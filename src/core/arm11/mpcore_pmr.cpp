@@ -4,6 +4,7 @@
 #include "common/common.hpp"
 #include "core/timers.hpp"
 #include "core/arm11/mpcore_pmr.hpp"
+#include "common/log.hpp"
 
 MPCore_PMR::MPCore_PMR(ARM_CPU arm11[4], Timers* timers) :
     arm11(arm11), timers(timers)

@@ -3,6 +3,7 @@
 #include "core/arm9/dma9.hpp"
 #include "common/common.hpp"
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 DMA9::DMA9(Emulator* e, Interrupt9* int9, Scheduler* scheduler) : e(e), int9(int9), scheduler(scheduler)
 {

@@ -2,6 +2,7 @@
 #include "core/arm11/wifi.hpp"
 #include "core/arm11/xtensa.hpp"
 #include "core/arm11/xtensa_interpreter.hpp"
+#include "common/log.hpp"
 
 Xtensa::Xtensa(WiFi* wifi) : wifi(wifi)
 {

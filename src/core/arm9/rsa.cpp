@@ -4,6 +4,7 @@
 #include "common/common.hpp"
 #include "core/arm9/interrupt9.hpp"
 #include "core/arm9/rsa.hpp"
+#include "common/log.hpp"
 
 #define printf(fmt,...) (void)(0)
 
