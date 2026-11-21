@@ -24,6 +24,58 @@ static bool trace_svc_enabled()
     return enabled;
 }
 
+//BLOSSOM_TRACE_MMIO=1 logs every I/O register access by the ARM11 cores to stderr (physical
+//address). Accesses repeated in a polling loop are counted instead of printed. Both CPU backends go
+//through here, so interpreter and JIT logs can be compared line by line. The ARM9 is left out on
+//purpose: it writes console keys to the AES engine, and these logs get shared.
+static bool trace_mmio_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_TRACE_MMIO");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static void trace_mmio(int id, char kind, int bits, uint32_t addr, uint32_t value)
+{
+    //Accesses already seen recently with the same value (a polling loop of up to 8 accesses)
+    //are only counted
+    struct Access { char kind; int bits; uint32_t addr, value; };
+    struct History { Access recent[8]; int count = 0, next = 0; uint64_t skipped = 0; };
+    static History history[16];
+    static uint64_t lines = 0;
+    const uint64_t MAX_LINES = 2000000;
+
+    History& h = history[id & 0xF];
+    for (int i = 0; i < h.count; i++)
+    {
+        const Access& r = h.recent[i];
+        if (r.kind == kind && r.bits == bits && r.addr == addr && r.value == value)
+        {
+            h.skipped++;
+            return;
+        }
+    }
+    h.recent[h.next] = {kind, bits, addr, value};
+    h.next = (h.next + 1) % 8;
+    if (h.count < 8)
+        h.count++;
+
+    if (lines >= MAX_LINES)
+        return;
+    if (h.skipped)
+    {
+        fprintf(stderr, "[MMIO] ARM%d   (%llu repeated accesses)\n", id, (unsigned long long)h.skipped);
+        h.skipped = 0;
+        lines++;
+    }
+    fprintf(stderr, "[MMIO] ARM%d %c%d $%08X = $%0*X\n", id, kind, bits, addr, bits / 4, value);
+    lines++;
+    if (lines == MAX_LINES)
+        fprintf(stderr, "[MMIO] line limit reached, tracing stops\n");
+}
+
 uint64_t ARM_CPU::global_exclusive_start[4];
 uint64_t ARM_CPU::global_exclusive_end[4];
 
@@ -804,9 +856,10 @@ uint8_t ARM_CPU::read8(uint32_t addr)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
-    if (id == 9)
-        return e->arm9_read8(addr);
-    return e->arm11_read8(id - 11, addr);
+    uint8_t value = (id == 9) ? e->arm9_read8(addr) : e->arm11_read8(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 8, addr, value);
+    return value;
 }
 
 uint16_t ARM_CPU::read16(uint32_t addr)
@@ -835,9 +888,10 @@ uint16_t ARM_CPU::read16(uint32_t addr)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
-    if (id == 9)
-        return e->arm9_read16(addr);
-    return e->arm11_read16(id - 11, addr);
+    uint16_t value = (id == 9) ? e->arm9_read16(addr) : e->arm11_read16(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 16, addr, value);
+    return value;
 }
 
 uint32_t ARM_CPU::read32(uint32_t addr)
@@ -874,9 +928,10 @@ uint32_t ARM_CPU::read32(uint32_t addr)
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
 
-    if (id == 9)
-        return e->arm9_read32(addr);
-    return e->arm11_read32(id - 11, addr);
+    uint32_t value = (id == 9) ? e->arm9_read32(addr) : e->arm11_read32(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 32, addr, value);
+    return value;
 }
 
 uint64_t ARM_CPU::read64(uint32_t addr)
@@ -906,6 +961,8 @@ void ARM_CPU::write8(uint32_t addr, uint8_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 8, addr, value);
     if (id == 9)
         e->arm9_write8(addr, value);
     else
@@ -936,6 +993,8 @@ void ARM_CPU::write16(uint32_t addr, uint16_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 16, addr, value);
     if (id == 9)
         e->arm9_write16(addr, value);
     else
@@ -989,6 +1048,8 @@ void ARM_CPU::write32(uint32_t addr, uint32_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 32, addr, value);
     if (id == 9)
         e->arm9_write32(addr, value);
     else

@@ -98,6 +98,9 @@ Variables de diagnóstico:
   (ARM11, ARM9, GPU, DSP…) y contadores del JIT.
 * `BLOSSOM_TRACE_SVC=1` vuelve a sacar la traza de SVC, IPC e interrupciones por stdout.
   Viene apagada porque escribir en consola en cada SVC frena más que el propio emulador.
+* `BLOSSOM_TRACE_MMIO=1` saca por stderr cada acceso de los ARM11 a registros de E/S (los bucles
+  de espera se cuentan en vez de repetirse). Sirve para comparar el intérprete con el JIT. El ARM9
+  queda fuera a propósito, porque escribe las claves de la consola en el motor AES.
 
 ### Controles
 
