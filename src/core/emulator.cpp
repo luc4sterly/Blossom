@@ -454,6 +454,9 @@ void Emulator::run()
             scheduler.process_events();
         }
     }
+    const bool prof_report = Profiler::enabled;
+    if (prof_report)
+        Profiler::enter(Profiler::REPORT);
     gpu.print_debug_stats(frames);
     ARM_CPU::print_svc_stats(frames);
     Profiler::end_frame(frames);
@@ -492,6 +495,8 @@ void Emulator::run()
             arm11[i].print_jit_stats();
         arm9.print_jit_stats();
     }
+    if (prof_report)
+        Profiler::leave();
     frames++;
 }
 

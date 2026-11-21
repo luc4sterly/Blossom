@@ -36,6 +36,8 @@ enum Bucket
     //for the UI between frames (and handing it the frame)
     LOOP,
     FRONTEND,
+    //End of frame bookkeeping in Emulator::run: trace and profile output
+    REPORT,
     BUCKET_COUNT
 };
 
