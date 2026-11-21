@@ -567,6 +567,47 @@ void ARM_CPU::swi()
                     service_handles[{pid, handle}] = it->second;
                 pending_service.erase(it);
             }
+            //Result of this thread's last service request: the reply sits in its command buffer
+            //when it next does an SVC (if it hasn't written a new request with another command
+            //id yet). Failures are counted as "FAIL service:header=result".
+            static std::map<std::pair<int, uint32_t>, std::pair<std::string, uint32_t>> pending_reply;
+            auto rep_it = pending_reply.find({pid, tls});
+            if (rep_it != pending_reply.end())
+            {
+                uint32_t reply_header = read32(tls + 0x80);
+                uint32_t result = read32(tls + 0x84);
+                if ((reply_header >> 16) == (rep_it->second.second >> 16) && (result & 0x80000000))
+                {
+                    char what[96];
+                    snprintf(what, sizeof(what), "FAIL %s:%08X=%08X", rep_it->second.first.c_str(),
+                             rep_it->second.second, result);
+                    count_svc(pid, procname, what);
+                    if (trace_svc_level() >= 2)
+                    {
+                        static int fail_lines = 0;
+                        if (fail_lines++ < 400)
+                            fprintf(stderr, "[SVCFAIL] PID%d[%s] %s\n", pid, procname.c_str(), what);
+                    }
+                }
+                pending_reply.erase(rep_it);
+            }
+            if (op == 0x32)
+            {
+                auto named = service_handles.find({pid, gpr[0]});
+                pending_reply[{pid, tls}] = {named != service_handles.end() ? named->second : "?",
+                                             read32(tls + 0x80)};
+                uint32_t hdr = read32(tls + 0x80);
+                if (hdr == 0x00010800)
+                {
+                    //err:f ThrowFatalError: type, result code, PC, PID, title IDs
+                    uint32_t w[9];
+                    for (int i = 0; i < 9; i++)
+                        w[i] = read32(tls + 0x84 + i * 4);
+                    fprintf(stderr, "[ERRF] PID%d[%s] type %d result $%08X pc $%08X pid $%X "
+                            "title %08X %08X app %08X %08X\n", pid, procname.c_str(), w[0] & 0xFF,
+                            w[1], w[2], w[3], w[5], w[4], w[7], w[6]);
+                }
+            }
             if (op != 0x32)
             {
                 char what[16];
