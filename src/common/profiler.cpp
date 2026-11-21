@@ -1,6 +1,33 @@
 #include <cstdio>
 #include <cstdlib>
 #include "common/profiler.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <unistd.h>
+#endif
+
+//Resident memory of the process in MB, or -1 if unknown
+static long resident_mb()
+{
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+        return (long)(pmc.WorkingSetSize >> 20);
+    return -1;
+#else
+    long pages = 0, resident = 0;
+    FILE* f = std::fopen("/proc/self/statm", "r");
+    if (!f)
+        return -1;
+    int n = std::fscanf(f, "%ld %ld", &pages, &resident);
+    std::fclose(f);
+    if (n != 2)
+        return -1;
+    return resident * sysconf(_SC_PAGESIZE) / (1024 * 1024);
+#endif
+}
 
 namespace Profiler
 {
@@ -88,7 +115,7 @@ void end_frame(int frame)
             std::fprintf(stderr, " | %s %llu", counter_names[i], (unsigned long long)counters[i]);
         counters[i] = 0;
     }
-    std::fprintf(stderr, "\n");
+    std::fprintf(stderr, " | ram %ld MB\n", resident_mb());
     frame_start = now;
 }
 
