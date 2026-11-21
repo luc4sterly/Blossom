@@ -32,6 +32,10 @@ enum Bucket
     JIT_FALLBACK,
     JIT_CODE_CHECK,
     JIT_GLUE,
+    //Inside "other": the emulator loop picking the next slice, and the emulation thread waiting
+    //for the UI between frames (and handing it the frame)
+    LOOP,
+    FRONTEND,
     BUCKET_COUNT
 };
 

@@ -4,6 +4,7 @@
 #include "blossom_qt/settings.hpp"
 
 #include "common/exceptions.hpp"
+#include "common/profiler.hpp"
 
 using namespace std;
 
@@ -19,7 +20,11 @@ void EmuThread::run()
     while (!quit)
     {
         old_frametime = chrono::system_clock::now();
-        while (!has_frame_settings);
+        {
+            //Waiting for the UI to take the last frame shows up as "frontend" in BLOSSOM_PROFILE
+            Profiler::Scope prof_scope(Profiler::FRONTEND);
+            while (!has_frame_settings);
+        }
 
         has_frame_settings = false;
         try
@@ -43,6 +48,7 @@ void EmuThread::run()
         auto now = chrono::system_clock::now();
         auto elapsed_time = now - old_frametime;
         int milliseconds = chrono::duration_cast<chrono::milliseconds>(elapsed_time).count();
+        Profiler::Scope prof_scope(Profiler::FRONTEND);
         emit frame_complete(e.get_top_buffer(), e.get_bottom_buffer(), milliseconds);
     }
 }

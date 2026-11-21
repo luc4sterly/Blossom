@@ -385,6 +385,9 @@ void Emulator::run()
     cartridge.save_check();
     while (!frame_ended)
     {
+        const bool prof_loop = Profiler::enabled;
+        if (prof_loop)
+            Profiler::enter(Profiler::LOOP);
         scheduler.calculate_cycles_to_run();
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
@@ -404,6 +407,8 @@ void Emulator::run()
         }
         if (cycles11 < 64)
             Profiler::counters[Profiler::SHORT_SLICES]++;
+        if (prof_loop)
+            Profiler::leave();
 
         {
             Profiler::Scope prof_scope(Profiler::ARM11);
