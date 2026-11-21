@@ -1,1 +1,4 @@
 pyctr==0.7.6
+pyfatfs==1.1.0
+# pyfatfs uses PyFilesystem2 ("fs"), which still imports pkg_resources (removed in setuptools 81)
+setuptools<81

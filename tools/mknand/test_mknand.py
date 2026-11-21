@@ -6,6 +6,7 @@
 # boot9 accepts it can only be tested in Blossom with your own boot9.bin.
 
 import hashlib
+import io
 import os
 import random
 import struct
@@ -112,6 +113,78 @@ class EndToEndWithFakeKeys(unittest.TestCase):
             hashes = dict((label.split()[0], value) for label, value in mknand.explain_hashes(out, b9_path))
             self.assertEqual(hashes['sha256(otp_dec[0:0xE0])'], hashes['otp_dec[0xE0:0x100]'])
             self.assertEqual(hashes['sha256(nand_cid)'], hashlib.sha256(result.cid).hexdigest())
+
+
+class _FakeRecord:
+    def __init__(self, cid, cindex, size):
+        self.id, self.cindex, self.size = cid, cindex, size
+
+
+class _FakeTMD:
+    def __init__(self, tid):
+        self.title_id, self.title_version = tid, 0x2C10
+
+
+class _FakeCIA:
+    """Stands in for pyctr's CIAReader: decrypted sections keyed by the CIA path's title ID."""
+    def __init__(self, path, crypto=None, load_contents=True):
+        tid = os.path.basename(path)[:16]
+        self.tmd = _FakeTMD(tid)
+        rnd = random.Random(tid)
+        self.data = {-1: b'TMD!' + rnd.randbytes(0x200), 0: rnd.randbytes(0x30000), 1: rnd.randbytes(0x1234)}
+        self.content_info = [_FakeRecord('0000001a', 0, len(self.data[0])), _FakeRecord('0000002B', 1, len(self.data[1]))]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def open_raw_section(self, section):
+        return io.BytesIO(self.data[int(section)])
+
+
+@unittest.skipIf(pyctr_engine is None, 'pyctr is not installed')
+class InstallTitlesWithFakeCIAs(unittest.TestCase):
+    def test_titles_land_in_ctrnand(self):
+        import pyctr.type.cia as cia_mod
+        from pyfatfs.PyFatFS import PyFatFS
+        from pyctr.type.nand import NAND
+
+        real = cia_mod.CIAReader
+        cia_mod.CIAReader = _FakeCIA
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_b9 = random.Random(9).randbytes(0x10000)
+                b9_path = os.path.join(tmp, 'fake_boot9.bin')
+                with open(b9_path, 'wb') as f:
+                    f.write(fake_b9)
+                pyctr_engine.BOOT9_PROT_HASH = hashlib.sha256(fake_b9[0x8000:]).hexdigest()
+                cias = [os.path.join(tmp, '0004013000001502.cia'), os.path.join(tmp, '0004800542383841.cia')]
+                for c in cias:
+                    open(c, 'wb').close()
+
+                firm = b'FIRM' + bytes(0x1000)
+                out = os.path.join(tmp, 'nand.bin')
+                result = mknand.build_nand(out, b9_path, firm, 'titles', cias, log=lambda *_: None)
+                self.assertEqual([t.title_id for t in result.titles], ['0004013000001502'])  # TWL one skipped
+                self.assertEqual(mknand.verify_nand(out, b9_path, firm, result.titles), [])
+
+                # Check the bytes themselves through an independent decrypt + mount
+                fake = _FakeCIA(cias[0])
+                nand = NAND(out, crypto=mknand.make_crypto(b9_path))
+                vol_path = os.path.join(tmp, 'ctr.img')
+                with nand.open_ctr_partition(0) as src, open(vol_path, 'wb') as dst:
+                    dst.write(src.read())
+                nand.close()
+                vol = PyFatFS(vol_path)
+                base = '/title/00040130/00001502/content'
+                self.assertEqual(vol.readbytes(f'{base}/00000000.tmd'), fake.data[-1])
+                self.assertEqual(vol.readbytes(f'{base}/0000001a.app'), fake.data[0])
+                self.assertEqual(vol.readbytes(f'{base}/0000002b.app'), fake.data[1])
+                vol.close()
+        finally:
+            cia_mod.CIAReader = real
 
 
 if __name__ == '__main__':

@@ -3,7 +3,7 @@
 Genera una imagen de NAND de Old 3DS que Blossom puede arrancar con el boot9 emulado,
 sin tener un dump de una consola real. Es la fase 1 del estudio de la NAND sintética:
 llega hasta que el boot9 acepte el OTP, la cabecera y el FIRM, y salte al NATIVE_FIRM.
-CTRNAND va formateada pero vacía (sin títulos ni bases de datos todavía).
+Con `--cias` instala además los títulos de sistema en CTRNAND (sin las bases de datos de `dbs/` todavía).
 
 ## Qué mete en la imagen
 
@@ -16,7 +16,7 @@ CTRNAND va formateada pero vacía (sin títulos ni bases de datos todavía).
 | TWL MBR + TWLN + TWLP | MBR estándar y FAT16 vacías, cifradas con la clave TWL derivada del OTP |
 | AGB_FIRM save | Vacía |
 | FIRM0 / FIRM1 | NATIVE_FIRM de Old 3DS (`0004013800000002`), cifrado con el keyslot 0x06 |
-| CTR MBR + CTRNAND | MBR y FAT16 vacía, cifradas con el keyslot 0x04 |
+| CTR MBR + CTRNAND | MBR y FAT16, cifradas con el keyslot 0x04. Con `--cias`, `title/<alto>/<bajo>/content/00000000.tmd` y un `<id>.app` por contenido (sin la capa de title key; el cifrado NCCH se queda como en la consola) |
 
 Toda la criptografía (claves de consola a partir del OTP, contadores a partir del CID, title key
 de los CIA) la hace [pyctr](https://github.com/ihaveamac/pyctr) (MIT). No se incluye ni se descarga
@@ -38,6 +38,7 @@ python3 -m venv .venv && .venv/bin/pip install -r tools/mknand/requirements.txt
 .venv/bin/python tools/mknand/mknand.py \
     --boot9 /ruta/a/boot9.bin \
     --native-firm-cia /ruta/a/0004013800000002.cia \
+    --cias /ruta/a/11.17.0-50E.OLD/ \
     -o nand_synth.bin
 
 ./build/src/blossom_qt/blossom --boot9 boot9.bin --boot11 boot11.bin \
@@ -46,6 +47,8 @@ python3 -m venv .venv && .venv/bin/pip install -r tools/mknand/requirements.txt
 
 Opciones útiles:
 
+- `--cias RUTA...`: CIA sueltos o carpetas con CIA. Los títulos TWL (`0004800x…`) se saltan de momento.
+- `--explain IMAGEN`: no genera nada; imprime los SHA que el boot9 calcula para esa imagen, para compararlos con un log de Blossom.
 - `--firm archivo.firm`: usar un NATIVE_FIRM ya descifrado en vez del CIA.
 - `--seed texto`: OTP y CID reproducibles (misma semilla, misma NAND).
 - `--no-verify`: no releer la imagen al terminar.
@@ -65,6 +68,10 @@ probar en Blossom con tu propio `boot9.bin`.
 
 ## Lo que falta (fases siguientes)
 
-- Instalar los títulos de sistema en CTRNAND (`title/`, `dbs/*.db` con su CMAC, tickets).
+- Bases de datos de CTRNAND (`dbs/title.db`, `ticket.db`, `import.db`, `certs.db`) con su CMAC.
+- Títulos TWL en TWLN.
 - `movable.sed`, `SecureInfo_A` autofirmado, HWCAL.
 - New 3DS: necesita el sector secreto 0x96 de una consola real.
+
+Nota: genera la imagen en el sistema de archivos de Linux (por ejemplo `~/` en WSL2), no en
+`/mnt/c`. Usa archivos dispersos de casi 1 GB y en NTFS van mucho más lentos.

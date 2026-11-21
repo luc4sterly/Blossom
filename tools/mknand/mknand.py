@@ -247,13 +247,92 @@ def extract_native_firm(cia_path: str, boot9_path: str) -> bytes:
 
 
 @dataclass
+class InstalledTitle:
+    title_id: str
+    version: int
+    size: int
+    contents: list[str]
+
+
+def is_twl_title(title_id: str) -> bool:
+    """DSiWare / TWL system titles (0004800x...) live in TWL NAND and only TWL_FIRM uses them."""
+    return title_id[3:5] == '48'
+
+
+def find_cias(paths: list[str]) -> list[str]:
+    found = []
+    for path in paths:
+        if os.path.isdir(path):
+            for root, _, files in os.walk(path):
+                found += [os.path.join(root, f) for f in files if f.lower().endswith('.cia')]
+        else:
+            found.append(path)
+    return sorted(found)
+
+
+def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> list[InstalledTitle]:
+    """
+    Install CTR titles from CIAs into a mounted CTRNAND file system (a pyfs-style object).
+
+    Each title goes to /title/<high>/<low>/content/ as 00000000.tmd plus one <content id>.app per
+    content in the CIA, with the title-key layer removed (NCCH encryption stays, as on a console).
+    The title, ticket and import databases in /dbs are not written yet.
+    """
+    from pyctr.type.cia import CIAReader, CIASection
+
+    installed = []
+    for path in cia_paths:
+        with CIAReader(path, crypto=make_crypto(boot9_path), load_contents=False) as cia:
+            tid = cia.tmd.title_id
+            if is_twl_title(tid):
+                log(f'skip {tid}: TWL title (TWL NAND is not filled yet)')
+                continue
+            base = f'/title/{tid[0:8]}/{tid[8:16]}/content'
+            volume.makedirs(base, recreate=True)
+            with cia.open_raw_section(CIASection.TitleMetadata) as src, \
+                    volume.openbin(f'{base}/00000000.tmd', 'w') as dst:
+                dst.write(src.read())
+            total = 0
+            names = []
+            for record in cia.content_info:
+                name = f'{record.id.lower()}.app'
+                with cia.open_raw_section(record.cindex) as src, volume.openbin(f'{base}/{name}', 'w') as dst:
+                    while chunk := src.read(0x100000):
+                        dst.write(chunk)
+                total += record.size
+                names.append(name)
+            installed.append(InstalledTitle(tid, int(cia.tmd.title_version), total, names))
+    return installed
+
+
+def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x100000) -> None:
+    """
+    Copy a plaintext FAT volume into an encrypted partition file object. The FAT area is always
+    copied; after it, all-zero chunks are skipped (free clusters can hold anything).
+    """
+    zero = bytes(chunk)
+    with open(src_path, 'rb') as src:
+        dst.seek(0)
+        dst.write(src.read(meta_len))
+        pos = meta_len
+        src.seek(pos)
+        while data := src.read(chunk):
+            if data != zero[:len(data)]:
+                dst.seek(pos)
+                dst.write(data)
+            pos += len(data)
+
+
+@dataclass
 class BuildResult:
     otp_plain: bytes
     otp_enc: bytes
     cid: bytes
+    titles: list[InstalledTitle]
 
 
-def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None) -> BuildResult:
+def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
+               cia_paths: list[str] | None = None, log=print) -> BuildResult:
     from pyctr.type.nand import NAND, NANDSection
 
     check_firm(firm)
@@ -304,7 +383,6 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None) ->
         volumes = [
             (NANDSection.TWLNAND, TWL_MBR_ENTRIES[0], b'TWL-NAND'),
             (NANDSection.TWLNAND, TWL_MBR_ENTRIES[1], b'TWL-PHOTO'),
-            (NANDSection.CTRNAND, CTR_MBR_ENTRIES[0], b'CTR-NAND'),
         ]
         for section, entry, label in volumes:
             lba, count = entry[4], entry[5]
@@ -312,6 +390,31 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None) ->
             with nand.open_raw_section(section) as f:
                 f.seek(lba * NAND_MEDIA_UNIT)
                 f.write(data)
+
+        # CTRNAND: format and fill a plaintext copy, then encrypt it into place.
+        titles = []
+        lba, count = CTR_MBR_ENTRIES[0][4], CTR_MBR_ENTRIES[0][5]
+        data, meta_len = build_fat16_boot_and_tables(count, b'CTR-NAND', rng.getrandbits(32))
+        tmp_path = out_path + '.ctrnand.tmp'
+        try:
+            with open(tmp_path, 'wb') as f:
+                f.truncate(count * NAND_MEDIA_UNIT)
+                f.write(data)
+            if cia_paths:
+                from pyfatfs.PyFatFS import PyFatFS
+                volume = PyFatFS(tmp_path)
+                try:
+                    titles = install_titles(volume, cia_paths, boot9_path, log)
+                finally:
+                    volume.close()
+            with nand.open_raw_section(NANDSection.CTRNAND) as part:
+                from pyctr.fileio import SubsectionIO
+                dst = SubsectionIO(part, lba * NAND_MEDIA_UNIT, count * NAND_MEDIA_UNIT)
+                write_volume_encrypted(tmp_path, dst, meta_len)
+                dst.close()
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
     finally:
         nand.close()
 
@@ -322,10 +425,38 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None) ->
         f.seek(0)
         f.write(self_sign(signed_part))
 
-    return BuildResult(otp_plain=otp_plain, otp_enc=otp_enc, cid=cid)
+    return BuildResult(otp_plain=otp_plain, otp_enc=otp_enc, cid=cid, titles=titles)
 
 
-def verify_nand(path: str, boot9_path: str, firm: bytes) -> list[str]:
+def verify_titles(nand, path: str, titles: list[InstalledTitle]) -> list[str]:
+    """Decrypt CTRNAND to a temporary file, mount it and check every installed file is there."""
+    from pyfatfs.PyFatFS import PyFatFS
+
+    problems = []
+    tmp_path = path + '.verify.tmp'
+    try:
+        with nand.open_ctr_partition(0) as src, open(tmp_path, 'wb') as dst:
+            while chunk := src.read(0x400000):
+                dst.write(chunk)
+        volume = PyFatFS(tmp_path)
+        try:
+            for t in titles:
+                base = f'/title/{t.title_id[0:8]}/{t.title_id[8:16]}/content'
+                for name in ['00000000.tmd'] + t.contents:
+                    if not volume.exists(f'{base}/{name}'):
+                        problems.append(f'missing {base}/{name}')
+                size = sum(volume.getsize(f'{base}/{n}') for n in t.contents if volume.exists(f'{base}/{n}'))
+                if size != t.size:
+                    problems.append(f'{t.title_id}: contents are {size} bytes, expected {t.size}')
+        finally:
+            volume.close()
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    return problems
+
+
+def verify_nand(path: str, boot9_path: str, firm: bytes, titles: list[InstalledTitle] | None = None) -> list[str]:
     """
     Reopen the image like a NAND dump (OTP and CID from essential.exefs only) and check every part.
     Returns a list of problems; empty means it looks right.
@@ -352,6 +483,8 @@ def verify_nand(path: str, boot9_path: str, firm: bytes) -> list[str]:
                 bs = f.read(0x200)
                 if bs[0x36:0x3E] != b'FAT16   ' or bs[0x1FE:0x200] != b'\x55\xAA':
                     problems.append(f'{name} has no FAT16 boot sector')
+        if titles:
+            problems += verify_titles(nand, path, titles)
     finally:
         nand.close()
 
@@ -408,6 +541,9 @@ def main(argv=None) -> int:
     src.add_argument('--native-firm-cia', help=f'Old 3DS NATIVE_FIRM CIA ({O3DS_NATIVE_FIRM_TID}.cia)')
     src.add_argument('--firm', help='an already decrypted NATIVE_FIRM .firm image')
     p.add_argument('-o', '--out', default='nand_synth.bin', help='output image (default: nand_synth.bin)')
+    p.add_argument('--cias', nargs='+', metavar='PATH',
+                   help='system title CIAs (files or folders) to install into CTRNAND; '
+                        'TWL titles are skipped for now')
     p.add_argument('--seed', help='make the fake OTP/CID reproducible from this text')
     p.add_argument('--no-verify', action='store_true', help='skip re-reading the image after building it')
     p.add_argument('--explain', metavar='IMAGE',
@@ -433,12 +569,15 @@ def main(argv=None) -> int:
         else:
             firm = extract_native_firm(args.native_firm_cia, args.boot9)
 
-        result = build_nand(args.out, args.boot9, firm, args.seed)
+        cias = find_cias(args.cias) if args.cias else []
+        result = build_nand(args.out, args.boot9, firm, args.seed, cias)
+        if cias:
+            print(f'installed {len(result.titles)} titles into CTRNAND')
         device_id = struct.unpack_from('<I', result.otp_plain, 4)[0]
         print(f'wrote {args.out} ({O3DS_NAND_SIZE:#x} bytes), fake DeviceId {device_id:#010x}')
 
         if not args.no_verify:
-            problems = verify_nand(args.out, args.boot9, firm)
+            problems = verify_nand(args.out, args.boot9, firm, result.titles)
             if problems:
                 for problem in problems:
                     print(f'verify: {problem}', file=sys.stderr)
