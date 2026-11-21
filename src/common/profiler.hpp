@@ -18,6 +18,9 @@ enum Bucket
     GPU_TRANSFER,
     GPU_MEMFILL,
     GPU_DISPLAY,
+    //Inside gpu-cmd: vertex shader runs and triangle rasterization
+    GPU_SHADER,
+    GPU_RASTER,
     DSP,
     WIFI,
     DMA_TIMERS,

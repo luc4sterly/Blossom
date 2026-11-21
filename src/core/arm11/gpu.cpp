@@ -1596,6 +1596,7 @@ bool GPU::get_fill_rule_bias(Vertex &vtx, Vertex &line1, Vertex &line2)
 
 void GPU::rasterize_tri(Vertex &v0, Vertex &v1, Vertex &v2)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     //The triangle rasterization code uses an approach with barycentric coordinates
     //Clear explanation can be read below:
     //https://fgiesen.wordpress.com/2013/02/06/the-barycentric-conspirac/
@@ -3090,6 +3091,7 @@ void GPU::update_stencil(uint32_t addr, uint8_t old, uint8_t ref, uint8_t func)
 
 void GPU::exec_shader(ShaderUnit& sh)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_SHADER);
     //Prepare input registers
     for (int i = 0; i < sh.total_inputs; i++)
     {

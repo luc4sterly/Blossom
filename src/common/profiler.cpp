@@ -61,7 +61,7 @@ const char* counter_names[COUNTER_COUNT] =
 
 const char* names[BUCKET_COUNT] =
 {
-    "other", "arm11", "arm9", "gpu-cmd", "gpu-xfer", "gpu-fill", "gpu-disp", "dsp", "wifi", "dma+timers", "events",
+    "other", "arm11", "arm9", "gpu-cmd", "gpu-xfer", "gpu-fill", "gpu-disp", "gpu-vsh", "gpu-raster", "dsp", "wifi", "dma+timers", "events",
     "jit-mem", "jit-interp", "jit-codecheck", "jit-glue"
 };
 
