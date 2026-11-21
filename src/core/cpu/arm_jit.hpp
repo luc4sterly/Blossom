@@ -94,6 +94,7 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         bool prefetch_abort_pending;
         uint32_t prefetch_abort_addr;
         bool svc_pending;
+        bool irq_requested;
 
         //Address space ids: translation table base (or "MMU off") -> small id in the context
         std::unordered_map<uint32_t, uint32_t> context_ids;

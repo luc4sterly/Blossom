@@ -178,6 +178,7 @@ void ARM_JIT::reset()
     data_abort_pending = false;
     prefetch_abort_pending = false;
     svc_pending = false;
+    irq_requested = false;
     cycle_target = 0;
 
     sync_vfp_to_jit();
@@ -190,6 +191,7 @@ void ARM_JIT::leave()
 
 void ARM_JIT::request_exit()
 {
+    irq_requested = true;
     jit->HaltExecution(HALT_STOP);
 }
 
@@ -320,8 +322,16 @@ void ARM_JIT::run(int cycles)
             cpu.swi();
         }
 
-        if (cpu.int_pending)
-            cpu.int_check();
+        //Same timing as the interpreter: an interrupt raised while this core runs is taken right
+        //away, anything else that is pending (masked earlier, unmasked since) at the end of the
+        //slice. Taking it as soon as CPSIE/MSR unmasks it, as before, made the kernel re-enter its
+        //IRQ handler over and over before acknowledging the interrupt.
+        if (irq_requested)
+        {
+            irq_requested = false;
+            if (cpu.int_pending)
+                cpu.int_check();
+        }
 
         if (cpu.halted || cpu.cycles_ran >= cycle_target)
             break;
@@ -329,6 +339,9 @@ void ARM_JIT::run(int cycles)
         update_context();
         sync_to_jit();
     }
+
+    if (cpu.int_pending)
+        cpu.int_check();
 }
 
 void ARM_JIT::on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed)
@@ -671,8 +684,9 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
         return;
     }
 
-    //WFI/WFE/a CP15 halt, or an instruction that unmasked a pending interrupt (CPS, MSR, ...)
-    if (cpu.halted || (cpu.int_pending && !cpu.CPSR.irq_disable))
+    //WFI/WFE/a CP15 halt. A pending interrupt that the instruction unmasked waits for the end of
+    //the slice, as on the interpreter.
+    if (cpu.halted)
         jit->HaltExecution(HALT_STOP);
 }
 
