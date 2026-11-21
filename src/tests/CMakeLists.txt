@@ -28,6 +28,11 @@ if (ENABLE_JIT)
         COMMAND blossom-cpu-tests --cpu jit --core arm11 "${CMAKE_CURRENT_SOURCE_DIR}/lletest.elf")
     set_tests_properties(lletest-jit PROPERTIES PASS_REGULAR_EXPRESSION "${LLETEST_PASS}" TIMEOUT 120)
 
+    # A loop of only indirect branches must still end each slice
+    add_test(NAME bxloop-jit
+        COMMAND blossom-cpu-tests --cpu jit --core arm11 --cycles 2000000 --slice 256 "${CMAKE_CURRENT_SOURCE_DIR}/bxloop.elf")
+    set_tests_properties(bxloop-jit PROPERTIES PASS_REGULAR_EXPRESSION "Ran 2000000 cycles" TIMEOUT 30)
+
     # Same suites on the dynarmic JIT, on the ARM9 (ARMv5TE) and on an ARM11 core (ARMv6K, MMU off).
     foreach (core arm9 arm11)
         add_test(NAME armwrestler-jit-${core}

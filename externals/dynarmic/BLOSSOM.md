@@ -61,3 +61,6 @@ These are passed through in the x64, arm64 and riscv64 address spaces.
   jumping to the next block, as the dispatcher does. Upstream only checks the cycle count, so a halt
   requested from a memory callback (an interrupt, a deferred cache invalidation) was ignored by a
   linked loop until the slice ran out.
+* `PopRSBHint` and `FastDispatchHint` terminals also check halts and the cycle count before
+  jumping. Upstream jumps straight to the next block, so a guest loop made only of indirect
+  branches (a BX to itself) never left `Jit::Run`.

@@ -10,6 +10,7 @@
 
 #include "common/exceptions.hpp"
 #include "common/profiler.hpp"
+#include "core/cpu/arm_disasm.hpp"
 #include "core/cpu/arm.hpp"
 #include "core/cpu/arm_jit.hpp"
 #include "core/cpu/cp15.hpp"
@@ -139,6 +140,11 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
             fprintf(stderr, "[ARM%d] JIT debug switches: %d\n", cpu.id, safe);
     }
 
+    //The return stack buffer is off: with it, opening the HOME Menu made memory grow by GBs a second
+    //on the PC test (ARM11 core 1 returning through POP {..., PC} in user code), and that went away
+    //with only this bit cleared. Root cause unknown; the measured cost is about 2%.
+    conf.optimizations &= ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
+
     //BLOSSOM_JIT_OPT=<mask>: dynarmic optimizations to keep (OptimizationFlag bits: 1 block
     //linking, 2 return stack buffer, 4 fast dispatch, 8 get/set elimination, 16 constant
     //propagation, 32 misc IR). Debug aid to find which one breaks something.
@@ -189,6 +195,21 @@ void ARM_JIT::request_exit()
 {
     irq_requested = true;
     jit->HaltExecution(HALT_STOP);
+}
+
+//A slice is a few hundred cycles, so a Run that makes this many memory callbacks or fallbacks has
+//lost track of its cycle budget (a loop with no cycle check). Stop it so the other cores and the
+//scheduler get to run, and say where it happened.
+void ARM_JIT::note_callback()
+{
+    if (++callbacks_this_run == 65536)
+    {
+        static int warned = 0;
+        if (warned++ < 16)
+            fprintf(stderr, "[JIT] ARM%d ran past its cycle budget in one Run, stopping it at $%08X\n",
+                    cpu.id, jit->Regs()[15]);
+        jit->HaltExecution(HALT_STOP);
+    }
 }
 
 void ARM_JIT::end_slice()
@@ -288,6 +309,7 @@ void ARM_JIT::run(int cycles)
     while (true)
     {
         cpu.in_jit = true;
+        callbacks_this_run = 0;
         jit->Run();
         cpu.in_jit = false;
         jit->ClearHalt(HALT_STOP | HALT_ABORT);
@@ -502,6 +524,7 @@ template <typename T, typename F>
 T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 {
     Profiler::counters[Profiler::JIT_SLOW_READS]++;
+    note_callback();
     Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
@@ -524,6 +547,7 @@ template <typename F>
 void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 {
     Profiler::counters[Profiler::JIT_SLOW_WRITES]++;
+    note_callback();
     Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
@@ -667,6 +691,7 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     (void)num_instructions; //Always 1 with interpret_system_instructions
     Profiler::counters[Profiler::JIT_FALLBACKS]++;
     fallback_count++;
+    note_callback();
     if (Profiler::enabled)
         fallback_pcs[pc]++;
     Profiler::Scope prof_scope(Profiler::JIT_FALLBACK);
@@ -695,6 +720,40 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     //the slice, as on the interpreter.
     if (cpu.halted)
         jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::debug_report()
+{
+    const auto& r = jit->Regs();
+    uint32_t cpsr = jit->Cpsr();
+    bool thumb = cpsr & (1 << 5);
+    fprintf(stderr, "[WATCHDOG] ARM%d jit: pc $%08X cpsr $%08X %s cycles %d/%d ctx $%08X | r0 $%08X r1 $%08X "
+            "r2 $%08X r3 $%08X r12 $%08X sp $%08X lr $%08X | contexts %zu code pages %zu\n",
+            cpu.id, r[15], cpsr, cpu.in_jit ? "in Run" : "outside Run", cpu.cycles_ran, cycle_target,
+            context, r[0], r[1], r[2], r[3], r[12], r[13], r[14], context_ids.size(), code_chunks.size());
+    int step = thumb ? 2 : 4;
+    for (int i = -4; i <= 3; i++)
+    {
+        uint32_t pc = r[15] + i * step;
+        uint64_t mem = (uint64_t)cpu.tlb_map[pc >> 12];
+        if (!(mem & TLB_READ) || (mem & TLB_MMIO))
+            continue;
+        const uint8_t* ptr = (const uint8_t*)(mem & ~TLB_FLAGS) + (pc & 0xFFF);
+        std::string text;
+        if (thumb)
+        {
+            uint16_t instr;
+            std::memcpy(&instr, ptr, 2);
+            text = ARM_Disasm::disasm_thumb(cpu, instr);
+        }
+        else
+        {
+            uint32_t instr;
+            std::memcpy(&instr, ptr, 4);
+            text = ARM_Disasm::disasm_arm(cpu, instr);
+        }
+        fprintf(stderr, "[WATCHDOG]   %s$%08X  %s\n", i == 0 ? "> " : "  ", pc, text.c_str());
+    }
 }
 
 void ARM_JIT::print_fallback_stats()

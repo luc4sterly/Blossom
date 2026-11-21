@@ -1214,12 +1214,25 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::Location
     }
 }
 
+// Blossom: the RSB and fast dispatch jump straight to the next block. Upstream does not check the
+// cycle count or halts there, so guest code that loops only through indirect branches (a BX to
+// itself, a function returning into a BLX loop) never left Jit::Run and hung the emulator.
+void A32EmitX64::EmitCheckCyclesAndHalt() {
+    code.cmp(dword[r15 + offsetof(A32JitState, halt_reason)], 0);
+    code.jne(code.GetReturnFromRunCodeAddress());
+    if (conf.enable_cycle_counting) {
+        code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
+        code.jng(code.GetReturnFromRunCodeAddress());
+    }
+}
+
 void A32EmitX64::EmitTerminalImpl(IR::Term::PopRSBHint, IR::LocationDescriptor, bool is_single_step) {
     if (!conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) || is_single_step) {
         code.ReturnFromRunCode();
         return;
     }
 
+    EmitCheckCyclesAndHalt();
     code.jmp(terminal_handler_pop_rsb_hint);
 }
 
@@ -1229,6 +1242,7 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::FastDispatchHint, IR::LocationDescri
         return;
     }
 
+    EmitCheckCyclesAndHalt();
     code.jmp(terminal_handler_fast_dispatch_hint);
 }
 

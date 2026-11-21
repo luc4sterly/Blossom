@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <algorithm>
 #include "common/exceptions.hpp"
 #include "core/scheduler.hpp"
@@ -32,16 +33,14 @@ void Scheduler::calculate_cycles_to_run()
 
     cycles11_to_run = 0;
 
+    //Up to the next event, at most one slice. An overdue event gives 0. (The clamp used to sit in
+    //an inner variable that shadowed this one, so an overdue event gave a negative slice that
+    //wrapped to a budget of over a billion cycles when cast to int.)
     int64_t delta = closest_event_time - quantum.count;
-
-    if (quantum.count + MAX_CYCLES <= closest_event_time)
+    if (delta > MAX_CYCLES)
         delta = MAX_CYCLES;
-    else
-    {
-        int64_t delta = closest_event_time - quantum.count;
-        if (delta < 0)
-            delta = 0;
-    }
+    if (delta < 0)
+        delta = 0;
 
     quantum_cycles = delta;
 
@@ -73,6 +72,14 @@ void Scheduler::calculate_cycles_to_run()
 void Scheduler::add_event(std::function<void(uint64_t)> func, int64_t cycles, uint64_t clockrate, uint64_t param)
 {
     SchedulerEvent event;
+
+    if (cycles < 0)
+    {
+        static int warned = 0;
+        if (warned++ < 8)
+            fprintf(stderr, "[Scheduler] Event scheduled %lld cycles in the past, running it now\n", (long long)cycles);
+        cycles = 0;
+    }
 
     event.func = func;
     event.time_registered = -1; //TODO

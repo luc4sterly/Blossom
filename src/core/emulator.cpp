@@ -325,6 +325,13 @@ void Emulator::watchdog_report(const char* reason, long mb)
             arm11[0].debug_pc(), arm11[0].is_halted() ? " halt" : "",
             arm11[1].debug_pc(), arm11[1].is_halted() ? " halt" : "",
             arm9.debug_pc(), arm9.is_halted() ? " halt" : "");
+    for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
+    {
+        if (!arm11[i].is_halted())
+            arm11[i].debug_report();
+    }
+    if (!arm9.is_halted())
+        arm9.debug_report();
     fprintf(stderr, "[WATCHDOG] counters this frame:");
     for (int i = 0; i < Profiler::COUNTER_COUNT; i++)
         fprintf(stderr, " %llu", (unsigned long long)Profiler::counters[i]);
