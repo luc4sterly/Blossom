@@ -54,3 +54,10 @@ These are passed through in the x64, arm64 and riscv64 address spaces.
   acts when `Run` returns, and a `CacheInvalidation` halt is only noticed at the end of a block, so
   code that rewrote an instruction and then branched to it ran the stale block. Blossom uses it for
   writes to pages it has compiled code from, and for CP15 "invalidate I-cache line by MVA".
+
+## Halts seen at block links
+
+* `backend/x64/a32_emit_x64.cpp`: with cycle counting, `LinkBlock` also checks `halt_reason` before
+  jumping to the next block, as the dispatcher does. Upstream only checks the cycle count, so a halt
+  requested from a memory callback (an interrupt, a deferred cache invalidation) was ignored by a
+  linked loop until the slice ran out.

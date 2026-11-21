@@ -1165,7 +1165,13 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
         return;
     }
 
+    Xbyak::Label dispatch;
     if (conf.enable_cycle_counting) {
+        // Blossom: a halt requested during the block (an interrupt, a cache invalidation, an SVC
+        // from a memory callback) must be seen here, as the dispatcher would without linking.
+        // Upstream only checks the cycle count, so a linked loop ran to the end of the slice.
+        code.cmp(dword[r15 + offsetof(A32JitState, halt_reason)], 0);
+        code.jne(dispatch);
         code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
 
         patch_information[terminal.next].jg.push_back(code.getCurr());
@@ -1185,6 +1191,7 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
         }
     }
 
+    code.L(dispatch);
     code.mov(MJitStateReg(A32::Reg::PC), A32::LocationDescriptor{terminal.next}.PC());
     PushRSBHelper(rax, rbx, terminal.next);
     code.ForceReturnFromRunCode();
