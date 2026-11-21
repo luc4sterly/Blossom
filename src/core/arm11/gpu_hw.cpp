@@ -127,9 +127,8 @@ bool GPU::set_renderer(const char* name)
     std::string n = name ? name : "";
     if (n == "software" || n == "sw" || n == "soft")
     {
-        if (hw)
-            fprintf(stderr, "[GPU] Renderer: software\n");
         hw_shutdown();
+        fprintf(stderr, "[GPU] Renderer: software\n");
         return true;
     }
     if (n != "vulkan" && n != "vk" && n != "hw")
