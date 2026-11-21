@@ -98,8 +98,12 @@ def build_otp_plain(rng: random.Random, device_id: int | None = None) -> bytes:
 
 
 def build_cid(rng: random.Random) -> bytes:
-    """Build a plausible-looking 16-byte eMMC CID. Only its SHA-256/SHA-1 matter for crypto."""
-    return rng.randbytes(16)
+    """
+    Build a 16-byte eMMC CID as the SDMMC response registers hold it (the 120 bits left after the
+    CRC is stripped). The top byte is always 0 on real hardware, and boot9 hashes the CID with
+    that byte cleared, so a random value there gives a counter boot9 never uses.
+    """
+    return rng.randbytes(15) + b'\x00'
 
 
 def build_exefs(files: list[tuple[str, bytes]]) -> bytes:

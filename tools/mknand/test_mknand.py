@@ -63,6 +63,11 @@ class PureBuilders(unittest.TestCase):
         ctr_end = max(e[4] + e[5] for e in mknand.CTR_MBR_ENTRIES) * 0x200
         self.assertLessEqual(ctr_end, mknand.O3DS_PARTITIONS[4][3])
 
+    def test_cid_top_byte_is_zero(self):
+        # boot9 hashes the CID with byte 15 cleared; a non-zero byte there breaks the NAND counter.
+        for seed in range(20):
+            self.assertEqual(mknand.build_cid(random.Random(seed))[15], 0)
+
     def test_rejects_encrypted_firm(self):
         with self.assertRaises(mknand.MkNandError):
             mknand.check_firm(b'\x12\x34' * 100)
