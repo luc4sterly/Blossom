@@ -746,6 +746,9 @@ void ARM_JIT::debug_report()
             "r2 $%08X r3 $%08X r12 $%08X sp $%08X lr $%08X | contexts %zu code pages %zu\n",
             cpu.id, r[15], cpsr, cpu.in_jit ? "in Run" : "outside Run", cpu.cycles_ran, cycle_target,
             context, r[0], r[1], r[2], r[3], r[12], r[13], r[14], context_ids.size(), code_chunks.size());
+    if (uint32_t stage = A32::compile_progress.stage)
+        fprintf(stderr, "[WATCHDOG] dynarmic compiling block $%08X, stage %s, %u IR instructions so far\n",
+                A32::compile_progress.pc, A32::CompileStageName(stage), A32::compile_progress.ir_insts);
     int step = thumb ? 2 : 4;
     for (int i = -4; i <= 3; i++)
     {
