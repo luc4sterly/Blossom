@@ -278,6 +278,7 @@ void ARM_CPU::reset()
     can_disassemble = false;
     event_pending = false;
     halted = false;
+    slice_ended = false;
     waiting_for_event = false;
     int_pending = false;
 
@@ -328,8 +329,18 @@ void ARM_CPU::interpret_one()
     }
 }
 
+void ARM_CPU::end_slice()
+{
+    slice_ended = true;
+#ifdef BLOSSOM_HAS_JIT
+    if (in_jit)
+        jit->end_slice();
+#endif
+}
+
 void ARM_CPU::run(int cycles)
 {
+    slice_ended = false;
     if (halted)
         return;
 
@@ -345,7 +356,7 @@ void ARM_CPU::run(int cycles)
     try
     {
         cycles_ran = 0;
-        while (!halted && cycles_ran < cycles)
+        while (!halted && !slice_ended && cycles_ran < cycles)
         {
             if (CPSR.thumb)
             {

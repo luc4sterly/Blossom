@@ -197,6 +197,11 @@ void ARM_JIT::request_exit()
     jit->HaltExecution(HALT_STOP);
 }
 
+void ARM_JIT::end_slice()
+{
+    jit->HaltExecution(HALT_STOP);
+}
+
 void ARM_JIT::clear_cache()
 {
     jit->ClearCache();
@@ -336,7 +341,7 @@ void ARM_JIT::run(int cycles)
                 cpu.int_check();
         }
 
-        if (cpu.halted || cpu.cycles_ran >= cycle_target)
+        if (cpu.halted || cpu.slice_ended || cpu.cycles_ran >= cycle_target)
             break;
 
         update_context();

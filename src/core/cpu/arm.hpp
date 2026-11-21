@@ -66,6 +66,7 @@ class ARM_CPU
         bool int_pending;
         bool event_pending;
         int cycles_ran;
+        bool slice_ended;
         uint64_t local_exclusive_start, local_exclusive_end;
 
         CP15* cp15;
@@ -115,6 +116,9 @@ class ARM_CPU
 
         void reset();
         void run(int cycles);
+        //Stops the current slice after this instruction, so the other processors run before this
+        //one goes on (see Emulator::pxi_sync_point)
+        void end_slice();
         void print_state();
         int get_id();
         int get_cycles_ran();

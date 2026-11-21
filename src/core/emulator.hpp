@@ -108,6 +108,7 @@ class Emulator
         //CPU backends: the dynarmic JIT (default when built in) or Corgi's interpreter.
         //Takes effect immediately; call it before booting. Returns false if the JIT is not built in.
         bool set_cpu_backend(bool arm11_jit, bool arm9_jit);
+        void pxi_sync_point(bool from_arm9);
         bool is_arm11_jit() const;
         bool is_arm9_jit() const;
         //Reads BLOSSOM_CPU (interp, jit, jit11 = JIT on ARM11 only) and applies it if set.

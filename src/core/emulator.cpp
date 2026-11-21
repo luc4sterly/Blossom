@@ -508,6 +508,23 @@ void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size, int core, bool thum
         cpu.run(slice);
 }
 
+//The boot ROMs hand values to each other through PXI_SYNC and some last only a few instructions:
+//boot11 sends 1, sees the ARM9's 1 and sends 14 at once, and boot9 must see the 1 to go on. The
+//cores take turns in slices, so the other side only sees the register between slices. Ending the
+//writer's slice right after the write lets the other processor run and see every value. Without
+//this the handshake depended on where a slice happened to end (it broke with longer slices and
+//with JIT block linking).
+void Emulator::pxi_sync_point(bool from_arm9)
+{
+    if (from_arm9)
+        arm9.end_slice();
+    else
+    {
+        for (int i = 0; i < 4; i++)
+            arm11[i].end_slice();
+    }
+}
+
 uint8_t Emulator::arm9_read8(uint32_t addr)
 {
     if (addr >= 0x08000000 && addr < 0x08000000 + arm9_ram_size)
@@ -766,6 +783,7 @@ void Emulator::arm9_write8(uint32_t addr, uint8_t value)
         int mask = ~(0xFF << shift);
         sync &= mask;
         pxi.write_sync9(sync | (value << shift));
+        pxi_sync_point(true);
         return;
     }
     switch (addr)
@@ -1004,6 +1022,7 @@ void Emulator::arm9_write32(uint32_t addr, uint32_t value)
             return;
         case 0x10008000:
             pxi.write_sync9(value);
+            pxi_sync_point(true);
             return;
         case 0x10008004:
             pxi.write_cnt9(value & 0xFFFF);
@@ -1300,12 +1319,14 @@ void Emulator::arm11_write8(int core, uint32_t addr, uint8_t value)
         {
             uint32_t sync = pxi.read_sync11() & 0xFFFF00FF;
             pxi.write_sync11(sync | (value << 8));
+            pxi_sync_point(false);
         }
             return;
         case 0x10163003:
         {
             uint32_t sync = pxi.read_sync11() & 0x00FFFFFF;
             pxi.write_sync11(sync | (value << 24));
+            pxi_sync_point(false);
         }
             return;
     }
@@ -1533,6 +1554,7 @@ void Emulator::arm11_write32(int core, uint32_t addr, uint32_t value)
             return;
         case 0x10163000:
             pxi.write_sync11(value);
+            pxi_sync_point(false);
             return;
         case 0x10163004:
             pxi.write_cnt11(value & 0xFFFF);
