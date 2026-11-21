@@ -118,6 +118,12 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
             break;
         }
 
+        if (options.interpret_hi != 0 && arm_pc >= options.interpret_lo && arm_pc <= options.interpret_hi) {
+            // Blossom: this range is never compiled; the interpreter runs it one instruction at a time
+            should_continue = visitor.InterpretThisInstruction();
+            break;
+        }
+
         if (const auto maybe_instruction = ReadThumbInstruction(arm_pc, tcb)) {
             const auto [thumb_instruction, inst_size] = *maybe_instruction;
             const bool is_thumb_16 = inst_size == ThumbInstSize::Thumb16;

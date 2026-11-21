@@ -274,7 +274,7 @@ private:
         }
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions});
+        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions, conf.interpret_lo, conf.interpret_hi});
         auto stage_done = [&](std::uint32_t next_stage) {
             compile_progress.ir_insts = static_cast<std::uint32_t>(ir_block.Instructions().size());
             if (dump) {
