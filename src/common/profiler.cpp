@@ -22,7 +22,8 @@ double totals[BUCKET_COUNT];
 
 const char* counter_names[COUNTER_COUNT] =
 {
-    "jit-cache-clears", "jit-range-invals", "jit-fallbacks", "jit-new-contexts"
+    "jit-icache-invals", "jit-range-invals", "jit-fallbacks", "jit-new-contexts",
+    "jit-translated-instrs", "jit-slow-reads", "jit-slow-writes", "jit-changed-chunks"
 };
 
 const char* names[BUCKET_COUNT] =

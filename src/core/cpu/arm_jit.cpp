@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -415,7 +416,7 @@ void ARM_JIT::invalidate_changed_code()
             if (hash_chunk(cp.host + chunk * 64) != cp.hashes[chunk])
             {
                 jit->InvalidateCacheRangeNow((page << 12) + chunk * 64, 64);
-                Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
+                Profiler::counters[Profiler::JIT_CHANGED_CHUNKS]++;
                 cp.chunks &= ~(1ULL << chunk);
             }
         }
@@ -472,6 +473,7 @@ void ARM_JIT::record_exception()
 template <typename T, typename F>
 T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 {
+    Profiler::counters[Profiler::JIT_SLOW_READS]++;
     try
     {
         T value = read();
@@ -492,6 +494,7 @@ T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 template <typename F>
 void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 {
+    Profiler::counters[Profiler::JIT_SLOW_WRITES]++;
     try
     {
         write();
@@ -528,6 +531,7 @@ std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
         uint32_t word;
         std::memcpy(&word, &ptr[vaddr & 0xFFF], sizeof(word));
         mark_code(vaddr, ptr);
+        Profiler::counters[Profiler::JIT_CODE_READS]++;
         return word;
     }
     catch (...)
@@ -624,6 +628,8 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     (void)num_instructions; //Always 1 with interpret_system_instructions
     Profiler::counters[Profiler::JIT_FALLBACKS]++;
     fallback_count++;
+    if (Profiler::enabled)
+        fallback_pcs[pc]++;
 
     try
     {
@@ -648,6 +654,26 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     //WFI/WFE/a CP15 halt, or an instruction that unmasked a pending interrupt (CPS, MSR, ...)
     if (cpu.halted || (cpu.int_pending && !cpu.CPSR.irq_disable))
         jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::print_fallback_stats()
+{
+    if (fallback_pcs.empty())
+        return;
+    std::vector<std::pair<uint32_t, uint64_t>> top(fallback_pcs.begin(), fallback_pcs.end());
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    fprintf(stderr, "[JIT] ARM%d fallbacks by PC:", cpu.id);
+    for (size_t i = 0; i < top.size() && i < 8; i++)
+    {
+        uint32_t pc = top[i].first;
+        uint64_t mem = (uint64_t)cpu.tlb_map[pc >> 12];
+        uint32_t instr = 0;
+        if ((mem & TLB_READ) && !(mem & TLB_MMIO))
+            std::memcpy(&instr, (const uint8_t*)(mem & ~TLB_FLAGS) + (pc & 0xFFF), 4);
+        fprintf(stderr, " $%08X:%08X x%llu", pc, instr, (unsigned long long)top[i].second);
+    }
+    fprintf(stderr, "\n");
+    fallback_pcs.clear();
 }
 
 void ARM_JIT::CallSVC(std::uint32_t swi)

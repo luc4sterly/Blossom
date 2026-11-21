@@ -219,6 +219,14 @@ void ARM_CPU::take_debug_stats(uint64_t& fallbacks, uint64_t& cycles)
     debug_cycles = 0;
 }
 
+void ARM_CPU::print_jit_stats()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        jit->print_fallback_stats();
+#endif
+}
+
 void ARM_CPU::set_test_console(bool enabled)
 {
     test_console = enabled;

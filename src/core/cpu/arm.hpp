@@ -105,6 +105,7 @@ class ARM_CPU
         //Debug counters for the profiler, reset when read: instructions the JIT sent to the
         //interpreter, and cycles run, since the last call
         void take_debug_stats(uint64_t& fallbacks, uint64_t& cycles);
+        void print_jit_stats();
         uint64_t debug_cycles;
 
         //Runs exactly one instruction on the interpreter (used by the JIT for system instructions)

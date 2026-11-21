@@ -98,8 +98,8 @@ Variables de diagnóstico:
   (ARM11, ARM9, GPU, DSP…), contadores del JIT y dónde está cada núcleo (línea `[CPU]`).
   Con `BLOSSOM_PROFILE=2` añade registros, ciclos e instrucciones interpretadas de cada núcleo.
 * `BLOSSOM_SLICE=<n>`: cuántos ciclos del reloj base corre cada núcleo antes de pasar al
-  siguiente. Con JIT es 1024 y con intérprete 256; si algo de temporización falla con JIT,
-  prueba 256.
+  siguiente (256 por defecto). Más largo va más rápido con JIT, pero rompe el arranque de las
+  boot ROMs, que es sensible a la temporización.
 * `BLOSSOM_JIT_SAFE=<n>` (depuración) apaga partes del JIT, sumando: 1 = sin tabla de páginas
   (toda la memoria por callbacks), 2 = una instrucción por bloque, 4 = sin optimizaciones.
   `BLOSSOM_JIT_OPT=<máscara>` elige qué optimizaciones de dynarmic quedan (1 enlazado de bloques,
