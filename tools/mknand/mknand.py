@@ -658,6 +658,58 @@ def check_code(image: str, boot9_path: str, title_id: str) -> list[str]:
     return lines
 
 
+def title_deps(image: str, boot9_path: str, title_id: str) -> list[str]:
+    """
+    Read an installed title's extended header from the image: its dependency list (the
+    sysmodules pm launches before it) and its allowed services, and say for each dependency
+    whether the image has it installed. Prints only title IDs and service names.
+    """
+    import io
+    from pyctr.type.ncch import NCCHReader, NCCHSection
+    import titledb
+    tid = title_id.replace(' ', '').lower()
+    base = f'/title/{tid[0:8]}/{tid[8:16]}/content'
+    lines = []
+    m = MountedCTRNAND(image, boot9_path)
+    try:
+        db_path = m.find('/dbs', 'title.db')
+        known = set()
+        if db_path:
+            fs = titledb.BDRI.from_image(titledb.read_diff(m.fs.readbytes(db_path)))
+            known = {t for t in fs.titles}
+        for name in sorted(m.fs.listdir(base)):
+            if not name.lower().endswith('.app'):
+                continue
+            try:
+                ncch = NCCHReader(io.BytesIO(m.fs.readbytes(f'{base}/{name}')), crypto=make_crypto(boot9_path))
+                if not ncch.check_for_extheader():
+                    continue
+                with ncch.open_raw_section(NCCHSection.ExtendedHeader) as f:
+                    ex = f.read(0x800)
+            except Exception as err:  # noqa: BLE001 - diagnostic
+                lines.append(f'{name}: error reading the extended header: {err}')
+                continue
+            lines.append(f'{name}: {ex[0:8].rstrip(bytes(1)).decode(errors="replace")}')
+            for i in range(0x30):
+                dep = struct.unpack_from('<Q', ex, 0x40 + i * 8)[0]
+                if not dep:
+                    continue
+                d = f'{dep:016x}'
+                folder = m.fs.isdir(f'/title/{d[0:8]}/{d[8:16]}/content')
+                lines.append(f'  depends on {d[0:8]} {d[8:16]}: '
+                             f'{"installed" if folder else "NOT INSTALLED"}'
+                             + ('' if not known else f', title.db {"yes" if dep in known else "NO"}'))
+            services = []
+            for i in range(34):
+                raw = ex[0x250 + i * 8:0x258 + i * 8].rstrip(bytes(1))
+                if raw:
+                    services.append(raw.decode(errors='replace'))
+            lines.append('  services: ' + ', '.join(services))
+    finally:
+        m.close()
+    return lines
+
+
 def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x400000) -> None:
     """
     Copy a plaintext FAT16 volume into an encrypted partition file object: the FAT area and every
@@ -968,6 +1020,8 @@ def main(argv=None) -> int:
                    help='console region in SecureInfo_A (default EUR; with --fix-titles, rewrites it)')
     p.add_argument('--check-code', nargs=2, metavar=('IMAGE', 'TITLE_ID'),
                    help='do not build: compare a title\'s decrypted .code with its ExeFS hash')
+    p.add_argument('--deps', nargs=2, metavar=('IMAGE', 'TITLE_ID'),
+                   help='do not build: list a title\'s exheader dependencies and services')
     p.add_argument('--explain', metavar='IMAGE',
                    help='do not build: print the hashes boot9 computes for an existing image, '
                         'to compare with a SHA log from Blossom')
@@ -1006,6 +1060,14 @@ def main(argv=None) -> int:
         except MkNandError as err:
             print(f'error: {err}', file=sys.stderr)
             return 1
+        return 0
+    if '--deps' in argv:
+        e = argparse.ArgumentParser()
+        e.add_argument('--boot9', required=True)
+        e.add_argument('--deps', nargs='+', required=True)
+        eargs, _ = e.parse_known_args(argv)
+        for line in title_deps(eargs.deps[0], eargs.boot9, ''.join(eargs.deps[1:])):
+            print(line)
         return 0
     if '--check-code' in argv:
         e = argparse.ArgumentParser()

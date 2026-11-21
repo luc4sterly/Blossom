@@ -342,6 +342,9 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 lines = mknand.check_code(out, b9_path, '00040130 00008002')
                 self.assertEqual(len(lines), 2)
                 self.assertTrue(all('error' in l for l in lines), lines)
+                lines = mknand.title_deps(out, b9_path, '00040130 00008002')
+                self.assertEqual(len(lines), 2)
+                self.assertTrue(all('error' in l for l in lines), lines)
         finally:
             cia_mod.CIAReader = real
 
