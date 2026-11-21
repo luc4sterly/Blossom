@@ -1,3 +1,4 @@
+#include <cstring>
 #include <sstream>
 #include "core/cpu/arm.hpp"
 #include "core/cpu/arm_disasm.hpp"
@@ -322,6 +323,22 @@ void ARM_CPU::swi()
             get_hos_process_info(*this, pid, procname);
             
             printf("(PID%d[%s]) SendSyncRequest: $%08X\n", pid, procname.c_str(), header);
+
+            //srv: GetServiceHandle (0x00050100) and RegisterService (0x00030100) carry the service
+            //name in words 1-2. Other services can reuse these headers, so only print printable names.
+            if (header == 0x00050100 || header == 0x00030100)
+            {
+                char name[9] = {};
+                uint32_t w1 = read32(tls + 0x84), w2 = read32(tls + 0x88);
+                memcpy(name, &w1, 4);
+                memcpy(name + 4, &w2, 4);
+                bool printable = name[0] != 0;
+                for (int i = 0; i < 8 && name[i]; i++)
+                    printable &= name[i] >= 0x20 && name[i] < 0x7F;
+                if (printable)
+                    printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
+                           header == 0x00050100 ? "GetServiceHandle" : "RegisterService", name);
+            }
         }
     }
     if (op == 0x3C)
