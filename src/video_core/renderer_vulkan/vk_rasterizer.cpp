@@ -31,6 +31,8 @@ constexpr VkDeviceSize UNIFORM_RING_SIZE = 4 * 1024 * 1024;
 constexpr VkDeviceSize STAGING_CHUNK_SIZE = 8 * 1024 * 1024;
 constexpr uint32_t DESCRIPTOR_SETS_PER_FLUSH = 1024;
 constexpr size_t TEXTURE_CACHE_LIMIT = 768;
+constexpr uint64_t TEXTURE_BYTES_LIMIT = 256ULL * 1024 * 1024;
+constexpr VkDeviceSize STAGING_KEEP = 64 * 1024 * 1024;
 constexpr VkFormat COLOR_FORMAT = VK_FORMAT_R8G8B8A8_UNORM;
 
 void check(VkResult r, const char* what)
@@ -136,6 +138,7 @@ struct VulkanRasterizer::Impl
     size_t staging_index = 0;
 
     std::unordered_map<uint64_t, Texture> textures;
+    uint64_t texture_bytes = 0;
     std::vector<uint64_t> texture_ids; //id - 1 -> cache key, rebuilt every submit
     std::unordered_map<TexTriple, VkDescriptorSet, TexTripleHash> desc_sets;
     uint32_t desc_sets_used = 0;
@@ -645,22 +648,34 @@ void VulkanRasterizer::Impl::submit_and_wait()
     for (auto& b : staging)
         b.offset = 0;
     staging_index = 0;
+    //A session with many texture misses can grow staging a lot; don't keep it all around
+    VkDeviceSize staging_total = 0;
+    for (auto& b : staging)
+        staging_total += b.size;
+    while (staging_total > STAGING_KEEP && staging.size() > 1)
+    {
+        staging_total -= staging.back().size;
+        free_buffer(staging.back());
+        staging.pop_back();
+    }
     vkResetDescriptorPool(device, desc_pool, 0);
     desc_sets.clear();
     desc_sets_used = 0;
     serial++;
 
     //Evict old textures that the GPU is no longer using
-    if (textures.size() > TEXTURE_CACHE_LIMIT)
+    if (textures.size() > TEXTURE_CACHE_LIMIT || texture_bytes > TEXTURE_BYTES_LIMIT)
     {
         std::vector<std::pair<uint64_t, uint64_t>> age;
         for (auto& t : textures)
             age.push_back({t.second.last_used, t.first});
         std::sort(age.begin(), age.end());
-        size_t drop = textures.size() - TEXTURE_CACHE_LIMIT / 2;
-        for (size_t i = 0; i < drop; i++)
+        size_t drop = textures.size() > TEXTURE_CACHE_LIMIT / 2 ? textures.size() - TEXTURE_CACHE_LIMIT / 2 : 0;
+        for (size_t i = 0; i < age.size() && (i < drop || texture_bytes > TEXTURE_BYTES_LIMIT / 2); i++)
         {
-            free_image(textures[age[i].second].image);
+            Texture& t = textures[age[i].second];
+            texture_bytes -= (uint64_t)t.width * t.height * 4;
+            free_image(t.image);
             textures.erase(age[i].second);
         }
     }
@@ -925,6 +940,19 @@ const std::string& VulkanRasterizer::device_name() const
     return impl->name;
 }
 
+std::string VulkanRasterizer::stats() const
+{
+    VkDeviceSize staging_total = 0;
+    for (auto& b : impl->staging)
+        staging_total += b.size;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu",
+             impl->textures.size(), (unsigned long long)(impl->texture_bytes >> 20),
+             (unsigned long long)(staging_total >> 20), impl->pipelines.size(),
+             (unsigned long long)impl->serial);
+    return buf;
+}
+
 bool VulkanRasterizer::in_session() const
 {
     return impl->session;
@@ -1018,6 +1046,7 @@ uint32_t VulkanRasterizer::texture(uint64_t hash, uint32_t width, uint32_t heigh
         d.barrier(d.upload_cmd, t.image.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        d.texture_bytes += (uint64_t)width * height * 4;
         it = d.textures.emplace(key, t).first;
     }
     it->second.last_used = d.serial;
@@ -1067,7 +1096,10 @@ void VulkanRasterizer::draw(const HwPipelineKey& key, const HwDynamicState& dyn,
             tt.t[i] = 0;
             if (!keys[i])
                 continue;
-            d.textures[keys[i]].last_used = d.serial;
+            auto kt = d.textures.find(keys[i]);
+            if (kt == d.textures.end())
+                continue;
+            kt->second.last_used = d.serial;
             d.texture_ids.push_back(keys[i]);
             tt.t[i] = (uint32_t)d.texture_ids.size();
         }

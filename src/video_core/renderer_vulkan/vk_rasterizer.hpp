@@ -78,6 +78,8 @@ class VulkanRasterizer
 
         const std::string& device_name() const;
         bool in_session() const;
+        //Cache sizes, for BLOSSOM_TRACE_GPU
+        std::string stats() const;
 
         // Starts a session on a width x height target. color: RGBA8 (R in the low byte),
         // depth: 0..1, stencil: 8 bits; all row-major, top row first.

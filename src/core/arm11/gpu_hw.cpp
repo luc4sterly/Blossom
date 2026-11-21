@@ -537,7 +537,17 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
     h.vk->draw(key, dyn, u, tex_ids, h.verts.data(), (uint32_t)h.verts.size());
 }
 
+void GPU::hw_print_stats(int frame)
+{
+    if (!hw)
+        return;
+    fprintf(stderr, "[GPUTRACE] frame %d: vulkan sessions %llu draws %llu | %s\n", frame,
+            (unsigned long long)hw->sessions, (unsigned long long)hw->draws, hw->vk->stats().c_str());
+}
+
 #else // !BLOSSOM_HAS_VULKAN
+
+void GPU::hw_print_stats(int) {}
 
 void GPU::hw_end_session() {}
 void GPU::hw_polygon(std::vector<Vertex>&) {}

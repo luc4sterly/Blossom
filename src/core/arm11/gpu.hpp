@@ -422,6 +422,7 @@ class GPU
         void hw_polygon(std::vector<Vertex>& poly);
         void hw_end_session();
         void hw_shutdown();
+        void hw_print_stats(int frame);
         uint32_t hw_read_fb(uint32_t addr, int size);
         void hw_write_fb(uint32_t addr, uint32_t value, int size);
     public:

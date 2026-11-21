@@ -165,6 +165,7 @@ void GPU::print_debug_stats(int frame)
 {
     if (!trace_enabled() || frame % 60)
         return;
+    hw_print_stats(frame);
     fprintf(stderr, "[GPUTRACE] frame %d: cmdlists %llu (%llu words, %llu draws, %llu finalize) "
             "ppf %llu memfill %llu/%llu | fb0 sel %llu addr %llu fill %llu (%s $%06X) "
             "fb1 sel %llu addr %llu fill %llu (%s $%06X) lcd_init %d\n", frame,
