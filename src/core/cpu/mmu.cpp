@@ -409,6 +409,12 @@ uint32_t MMU::get_l1_table_control()
     return l1_table_control;
 }
 
+uint32_t MMU::get_ttbr1_boundary()
+{
+    uint32_t n = l1_table_control & 0x7;
+    return n ? (1U << (32 - n)) : 0;
+}
+
 uint32_t MMU::get_domain_control()
 {
     return domain_control;

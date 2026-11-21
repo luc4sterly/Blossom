@@ -36,7 +36,8 @@ New `UserConfig` / `TranslationOptions` fields:
   disabled bit set in the context, VFP instructions are interpreted too, so the kernel's lazy VFP
   switching still takes its undefined-instruction trap.
 * `fast_cp15_thread_id`: with the flag above, MRC p15, 0, Rd, c13, c0, {2,3,4} (thread id registers)
-  stays compiled and goes through the configured CP15 coprocessor.
+  stays compiled and goes through the configured CP15 coprocessor, and the CP15 barriers (MCR
+  c7,c10,4 DSB, c7,c10,5 DMB and c7,c5,4 ISB) compile to nothing.
 * `max_block_instructions`: caps a block's length. Without it, zero-filled memory translates into
   huge blocks of `andeq r0, r0, r0`. A block cut by the cap ends with `LinkBlock` to the next
   instruction (upstream only sets a terminal when the loop ends for one of its own reasons).

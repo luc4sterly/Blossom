@@ -42,7 +42,11 @@ class CP15
         //For the JIT: the thread ID registers (c13, c0, 2-4) and a key that identifies the
         //current address space (translation table 0 base, or ~0 while the MMU is off)
         uint32_t* get_thread_regs();
-        uint32_t get_address_space_key();
+        //Which compiled code a JIT may reuse at this PC: TTBR0 (one key per process), 0xFFFFFFFE
+        //for code translated through TTBR1 (the kernel, shared by every process), 0xFFFFFFFF with
+        //the MMU off
+        uint32_t get_address_space_key(uint32_t pc);
+        uint32_t get_ttbr1_boundary();
         void set_jit_page_table(JitPageTable* table);
 
         void set_data_abort_regs(uint32_t vaddr, bool is_write);

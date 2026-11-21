@@ -72,11 +72,21 @@ uint32_t* CP15::get_thread_regs()
     return thread_regs;
 }
 
-uint32_t CP15::get_address_space_key()
+uint32_t CP15::get_address_space_key(uint32_t pc)
 {
     if (!mmu_enabled || id == 9)
         return mmu_enabled ? 0 : 0xFFFFFFFF;
+    uint32_t boundary = mmu->get_ttbr1_boundary();
+    if (boundary && pc >= boundary)
+        return 0xFFFFFFFE;
     return mmu->get_l1_table_base(0);
+}
+
+uint32_t CP15::get_ttbr1_boundary()
+{
+    if (!mmu_enabled || id == 9)
+        return 0;
+    return mmu->get_ttbr1_boundary();
 }
 
 void CP15::set_data_abort_regs(uint32_t vaddr, bool is_write)

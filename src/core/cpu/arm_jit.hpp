@@ -99,6 +99,7 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         std::unordered_map<uint32_t, uint32_t> context_ids;
         uint32_t last_context_key;
         uint32_t last_context_id;
+        uint32_t global_context_id = ~0U;
         uint32_t context;
 
         //Self-modifying code: 64-byte chunks of each page that compiled code was read from. Pages

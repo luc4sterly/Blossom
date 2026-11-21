@@ -106,6 +106,8 @@ class MMU
 
         uint32_t get_l1_table_base(int index);
         uint32_t get_l1_table_control();
+        //First virtual address translated through TTBR1 (TTBCR.N > 0), or 0 if TTBR0 covers all
+        uint32_t get_ttbr1_boundary();
         uint32_t get_domain_control();
         void set_l1_table_base(int index, uint32_t value);
         void set_l1_table_control(uint32_t value);

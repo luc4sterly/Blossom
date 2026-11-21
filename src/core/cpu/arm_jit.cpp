@@ -169,6 +169,7 @@ void ARM_JIT::reset()
     page_table->invalidate_all();
     context_ids.clear();
     code_chunks.clear();
+    global_context_id = ~0U;
     last_context_key = 0;
     last_context_id = ~0U;
     context = 0;
@@ -202,7 +203,8 @@ void ARM_JIT::clear_cache()
 
 void ARM_JIT::update_context()
 {
-    uint32_t key = cpu.cp15->get_address_space_key();
+    uint32_t pc = cpu.gpr[15] - (cpu.CPSR.thumb ? 2 : 4);
+    uint32_t key = cpu.cp15->get_address_space_key(pc);
     if (key != last_context_key || last_context_id == ~0U)
     {
         auto it = context_ids.find(key);
@@ -214,9 +216,12 @@ void ARM_JIT::update_context()
             {
                 clear_cache();
                 context_ids.clear();
+                global_context_id = ~0U;
             }
             uint32_t new_id = (uint32_t)context_ids.size();
             it = context_ids.emplace(key, new_id).first;
+            if (key == 0xFFFFFFFE)
+                global_context_id = new_id;
             Profiler::counters[Profiler::JIT_CONTEXTS]++;
         }
         last_context_key = key;
@@ -409,6 +414,13 @@ void ARM_JIT::invalidate_changed_code()
     {
         CodePage& cp = it->second;
         uint32_t page = (uint32_t)(it->first & 0xFFFFF);
+        //Kernel code (TTBR1) is only ever changed by the kernel itself, and those writes are caught
+        //as they happen
+        if ((uint32_t)(it->first >> 20) == global_context_id)
+        {
+            ++it;
+            continue;
+        }
         for (uint32_t chunk = 0; chunk < 64; chunk++)
         {
             if (!(cp.chunks & (1ULL << chunk)))
@@ -532,6 +544,14 @@ std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
         std::memcpy(&word, &ptr[vaddr & 0xFFF], sizeof(word));
         mark_code(vaddr, ptr);
         Profiler::counters[Profiler::JIT_CODE_READS]++;
+        if (last_context_id == global_context_id && vaddr < cpu.cp15->get_ttbr1_boundary())
+        {
+            static bool warned = false;
+            if (!warned)
+                fprintf(stderr, "[ARM%d] JIT: kernel code branched to $%08X (TTBR0) without leaving the JIT; "
+                        "it is compiled as shared code\n", cpu.id, vaddr);
+            warned = true;
+        }
         return word;
     }
     catch (...)

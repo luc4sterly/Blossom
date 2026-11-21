@@ -62,8 +62,16 @@ bool TranslatorVisitor::arm_LDC(Cond cond, bool p, bool u, bool d, bool w, Reg n
 
 // MCR{2}<c> <coproc_no>, #<opc1>, <Rt>, <CRn>, <CRm>, #<opc2>
 bool TranslatorVisitor::arm_MCR(Cond cond, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
-    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them.
+    // Blossom: coprocessor accesses are system instructions in LLE; the interpreter handles them,
+    // except the CP15 barriers (DSB c7,c10,4, DMB c7,c10,5, ISB c7,c5,4): the kernel issues them
+    // all the time and they do nothing in an emulator that runs one core at a time.
     if (options.interpret_system_instructions) {
+        const bool barrier = options.fast_cp15_thread_id && coproc_no == 15 && opc1 == 0 && CRn == CoprocReg::C7
+                             && ((CRm == CoprocReg::C10 && (opc2 == 4 || opc2 == 5)) || (CRm == CoprocReg::C5 && opc2 == 4))
+                             && cond != Cond::NV;
+        if (barrier) {
+            return true;
+        }
         return InterpretThisInstruction();
     }
     if ((coproc_no & 0b1110) == 0b1010) {
