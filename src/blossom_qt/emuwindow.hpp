@@ -1,0 +1,78 @@
+#ifndef EMUWINDOW_HPP
+#define EMUWINDOW_HPP
+#include <QMainWindow>
+#include <QPaintEvent>
+#include <QCloseEvent>
+#include <QImage>
+#include <QKeyEvent>
+#include <QMouseEvent>
+
+#include <cstdint>
+
+#include "blossom_qt/emuthread.hpp"
+#include "blossom_qt/settingswindow.hpp"
+
+enum HID_PAD_STATE
+{
+    PAD_A,
+    PAD_B,
+    PAD_SELECT,
+    PAD_START,
+    PAD_RIGHT,
+    PAD_LEFT,
+    PAD_UP,
+    PAD_DOWN,
+    PAD_R,
+    PAD_L,
+    PAD_X,
+    PAD_Y
+};
+
+class EmuWindow : public QMainWindow
+{
+    Q_OBJECT
+    private:
+        EmuThread emuthread;
+        SettingsWindow* settings_window;
+        bool running;
+        QImage top_image, bottom_image;
+        QAction* open_cart_action;
+        QAction* no_cart_boot_action;
+
+        //Used for measuring the average frametime
+        constexpr static int FRAMETIME_COUNT = 10;
+        float past_frametimes[FRAMETIME_COUNT];
+        int frametime_index;
+
+        FrameSettings frame_settings;
+
+        void press_key(HID_PAD_STATE state);
+        void release_key(HID_PAD_STATE state);
+
+        void init_menu_bar();
+
+        void set_boot_options_enabled(bool enabled);
+
+        void draw(uint8_t* top_screen, uint8_t* bottom_screen);
+    public:
+        EmuWindow();
+
+        void keyPressEvent(QKeyEvent* event) override;
+        void keyReleaseEvent(QKeyEvent* event) override;
+        void closeEvent(QCloseEvent* event) override;
+
+        void mousePressEvent(QMouseEvent* event) override;
+        void mouseReleaseEvent(QMouseEvent* event) override;
+
+        void paintEvent(QPaintEvent* event) override;
+
+        void boot_emulator(QString cart_path);
+    signals:
+        void pass_frame_settings(FrameSettings* f);
+    public slots:
+        void display_boot_error(QString message);
+        void frame_complete(uint8_t* top_screen, uint8_t* bottom_screen, float msec);
+        void display_emu_error(QString message);
+};
+
+#endif // EMUWINDOW_HPP
