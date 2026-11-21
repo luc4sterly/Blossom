@@ -323,6 +323,28 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
             cia_mod.CIAReader = real
 
 
+    def test_check_code_on_fake_content(self):
+        # The fake contents are not NCCH, so it must say so instead of crashing
+        import pyctr.type.cia as cia_mod
+        real = cia_mod.CIAReader
+        cia_mod.CIAReader = _FakeCIA
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_b9 = random.Random(9).randbytes(0x10000)
+                b9_path = os.path.join(tmp, 'fake_boot9.bin')
+                with open(b9_path, 'wb') as f:
+                    f.write(fake_b9)
+                pyctr_engine.BOOT9_PROT_HASH = hashlib.sha256(fake_b9[0x8000:]).hexdigest()
+                cia = os.path.join(tmp, '0004013000008002.cia')
+                open(cia, 'wb').close()
+                out = os.path.join(tmp, 'nand.bin')
+                mknand.build_nand(out, b9_path, b'FIRM' + bytes(0x100), 'code', [cia], log=lambda *_: None)
+                lines = mknand.check_code(out, b9_path, '00040130 00008002')
+                self.assertEqual(len(lines), 2)
+                self.assertTrue(all('error' in l for l in lines), lines)
+        finally:
+            cia_mod.CIAReader = real
+
     def test_fix_titles_writes_cmd_and_movable(self):
         import pyctr.type.cia as cia_mod
         real = cia_mod.CIAReader

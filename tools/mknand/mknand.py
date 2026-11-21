@@ -619,6 +619,45 @@ def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
     return written
 
 
+def check_code(image: str, boot9_path: str, title_id: str) -> list[str]:
+    """
+    For one installed title, decrypt its ExeFS .code from the image and compare its SHA-256 with
+    the hash in the ExeFS header (what FS ReadFileSHA256 checks when loader reads .code).
+    Prints only sizes and hashes.
+    """
+    import io
+    from pyctr.type.ncch import NCCHReader
+    tid = title_id.replace(' ', '').lower()
+    base = f'/title/{tid[0:8]}/{tid[8:16]}/content'
+    lines = []
+    m = MountedCTRNAND(image, boot9_path)
+    try:
+        for name in sorted(m.fs.listdir(base)):
+            if not name.lower().endswith('.app'):
+                continue
+            raw = m.fs.readbytes(f'{base}/{name}')
+            try:
+                ncch = NCCHReader(io.BytesIO(raw), crypto=make_crypto(boot9_path))
+            except Exception as err:  # noqa: BLE001 - diagnostic
+                lines.append(f'{name}: error opening NCCH: {err}')
+                continue
+            if ncch.exefs is None or '.code' not in ncch.exefs.entries:
+                lines.append(f'{name}: no ExeFS .code')
+                continue
+            entry = ncch.exefs.entries['.code']
+            with ncch.exefs.open('.code') as f:
+                code = f.read()
+            real = hashlib.sha256(code).digest()
+            lines.append(f'{name}: .code offset {entry.offset:#x} size {entry.size:#x} '
+                         f'(size % 0x40 = {entry.size % 0x40:#x}), header hash {entry.hash.hex()}, '
+                         f'sha256 {real.hex()}, ' + ('MATCH' if real == entry.hash else 'MISMATCH'))
+            lines.append(f'{name}: NCCH main keyslot {ncch.main_keyslot:#x}, extra keyslot {ncch.extra_keyslot:#x}, '
+                         f'flags {ncch.flags}')
+    finally:
+        m.close()
+    return lines
+
+
 def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x400000) -> None:
     """
     Copy a plaintext FAT16 volume into an encrypted partition file object: the FAT area and every
@@ -927,6 +966,8 @@ def main(argv=None) -> int:
                    help='AES-CMAC keyslot for .cmd files (default 0x0B, the NAND DB key)')
     p.add_argument('--region', choices=sorted(REGIONS), default=None,
                    help='console region in SecureInfo_A (default EUR; with --fix-titles, rewrites it)')
+    p.add_argument('--check-code', nargs=2, metavar=('IMAGE', 'TITLE_ID'),
+                   help='do not build: compare a title\'s decrypted .code with its ExeFS hash')
     p.add_argument('--explain', metavar='IMAGE',
                    help='do not build: print the hashes boot9 computes for an existing image, '
                         'to compare with a SHA log from Blossom')
@@ -965,6 +1006,15 @@ def main(argv=None) -> int:
         except MkNandError as err:
             print(f'error: {err}', file=sys.stderr)
             return 1
+        return 0
+    if '--check-code' in argv:
+        e = argparse.ArgumentParser()
+        e.add_argument('--boot9', required=True)
+        e.add_argument('--check-code', nargs='+', required=True)
+        eargs, _ = e.parse_known_args(argv)
+        image, tid = eargs.check_code[0], ''.join(eargs.check_code[1:])
+        for line in check_code(image, eargs.boot9, tid):
+            print(line)
         return 0
     if '--explain' in argv:
         # --explain only needs --boot9; the FIRM source is not required.
