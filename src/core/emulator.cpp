@@ -1,3 +1,4 @@
+#include "common/profiler.hpp"
 #include <cstdio>
 #include <cstring>
 #include "common/common.hpp"
@@ -35,6 +36,7 @@ Emulator::Emulator() :
     timers(&int9, &mpcore_pmr, this),
     wifi(&cdma, &scheduler)
 {
+    Profiler::init();
     arm9_RAM = nullptr;
     axi_RAM = nullptr;
     fcram = nullptr;
@@ -215,28 +217,50 @@ void Emulator::run()
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
 
-        arm11[0].run(cycles11);
-        arm11[1].run(cycles11);
-
-        //TODO: Is it faster to always run the additional cores in Old3DS mode?
-        //Probably not, because the branch predictor should have an easy time with this
-        if (is_n3ds)
         {
-            arm11[2].run(cycles11);
-            arm11[3].run(cycles11);
+            Profiler::Scope prof_scope(Profiler::ARM11);
+            arm11[0].run(cycles11);
+            arm11[1].run(cycles11);
+
+            //TODO: Is it faster to always run the additional cores in Old3DS mode?
+            //Probably not, because the branch predictor should have an easy time with this
+            if (is_n3ds)
+            {
+                arm11[2].run(cycles11);
+                arm11[3].run(cycles11);
+            }
         }
 
-        arm9.run(cycles9);
-        timers.run(cycles11, cycles9);
-        dsp.run(cycles9);
-        dma9.process_ndma_reqs();
-        dma9.run_xdma();
-        cdma.run();
+        {
+            Profiler::Scope prof_scope(Profiler::ARM9);
+            arm9.run(cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DMA_TIMERS);
+            timers.run(cycles11, cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DSP);
+            dsp.run(cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DMA_TIMERS);
+            dma9.process_ndma_reqs();
+            dma9.run_xdma();
+            cdma.run();
+        }
 
-        int xtensa_cycles = scheduler.get_xtensa_cycles_to_run();
-        wifi.run(xtensa_cycles);
-        scheduler.process_events();
+        {
+            Profiler::Scope prof_scope(Profiler::WIFI);
+            int xtensa_cycles = scheduler.get_xtensa_cycles_to_run();
+            wifi.run(xtensa_cycles);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::EVENTS);
+            scheduler.process_events();
+        }
     }
+    Profiler::end_frame(frames);
     frames++;
 }
 

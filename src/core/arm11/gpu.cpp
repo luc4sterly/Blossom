@@ -1,3 +1,4 @@
+#include "common/profiler.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -116,6 +117,7 @@ void GPU::reset(uint8_t* vram)
 
 void GPU::render_frame()
 {
+    Profiler::Scope prof_scope(Profiler::GPU_DISPLAY);
     for (int y = 0; y < 400; y++)
     {
         for (int x = 0; x < 240; x++)
@@ -207,6 +209,7 @@ uint32_t GPU::get_swizzled_tile_addr(uint32_t base, uint32_t width, uint32_t x, 
 
 void GPU::do_transfer_engine_dma(uint64_t param)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_TRANSFER);
     if (dma.flags & (1 << 3))
     {
         printf("[GPU] Doing TexCopy\n");
@@ -420,6 +423,7 @@ void GPU::start_command_engine_dma(int index)
 
 void GPU::do_command_engine_dma(uint64_t index)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_CMDLIST);
     cur_cmdlist_ptr = ctx.cmd_engine[index].input_addr;
     cur_cmdlist_size = ctx.cmd_engine[index].size;
 
@@ -470,6 +474,7 @@ void GPU::do_command_engine_dma(uint64_t index)
 
 void GPU::do_memfill(int index)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_MEMFILL);
     //TODO: Is the end region inclusive or exclusive? This code assumes exclusive
     printf("[GPU] Do memfill%d\n", index);
     printf("Start: $%08X End: $%08X Value: $%08X Width: %d\n",
