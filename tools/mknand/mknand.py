@@ -322,6 +322,11 @@ def build_secureinfo(region: str, rng: random.Random) -> bytes:
     return self_sign(bytes(body)) + bytes(body)
 
 
+def build_lfcs_b(movable: bytes) -> bytes:
+    """/rw/sys/LocalFriendCodeSeed_B (0x110 bytes): the same signed seed movable.sed carries at 0x8."""
+    return movable[0x08:0x118]
+
+
 def build_movable(rng: random.Random) -> bytes:
     """
     A 0x120-byte movable.sed without CMAC: "SEED", a self-signed LocalFriendCodeSeed_B and a random
@@ -571,7 +576,8 @@ def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
     /private/movable.sed if there is none (its keyY is the CMAC key). Returns how many cmds.
     movable: 'keep' uses the image's movable.sed if it has one; 'new' always writes a fresh
     self-signed one; 'none' removes it and signs the cmds with an all-zero keyY (for testing).
-    /rw/sys/SecureInfo_A is written if missing (EUR) or whenever `region` is given.
+    /rw/sys/SecureInfo_A is written if missing (EUR) or whenever `region` is given, and
+    /rw/sys/LocalFriendCodeSeed_B (cfg reads the LFCS from it) if missing or whenever a new movable.sed is written.
     """
     from pyctr.type.cia import CIAReader
     m = MountedCTRNAND(image, boot9_path, writable=True)
@@ -579,6 +585,7 @@ def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
     try:
         m.fs.makedirs('/private', recreate=True)
         path = m.find('/private', 'movable.sed')
+        created_movable = False
         if movable == 'none':
             if path is not None:
                 m.fs.remove(path)
@@ -591,11 +598,19 @@ def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
             with m.fs.openbin('/private/movable.sed', 'w') as f:
                 f.write(sed)
             log('created /private/movable.sed')
+            created_movable = True
         else:
             sed = m.fs.readbytes(path)
             log(f'using {path} ({len(sed):#x} bytes)')
         m.crypto.setup_sd_key(sed)
         m.fs.makedirs('/rw/sys', recreate=True)
+        lfcs = m.find('/rw/sys', 'LocalFriendCodeSeed_B')
+        if len(sed) >= 0x120 and (lfcs is None or created_movable):
+            if lfcs is not None:
+                m.fs.remove(lfcs)
+            with m.fs.openbin('/rw/sys/LocalFriendCodeSeed_B', 'w') as f:
+                f.write(build_lfcs_b(sed))
+            log('wrote /rw/sys/LocalFriendCodeSeed_B (from movable.sed)')
         si = m.find('/rw/sys', 'SecureInfo_A')
         if si is None or region is not None:
             if si is not None:
@@ -831,6 +846,8 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
             movable = build_movable(rng)
             with volume.openbin('/private/movable.sed', 'w') as f:
                 f.write(movable)
+            with volume.openbin('/rw/sys/LocalFriendCodeSeed_B', 'w') as f:
+                f.write(build_lfcs_b(movable))
             crypto.setup_sd_key(movable)
             if cia_paths:
                 titles = install_titles(volume, cia_paths, boot9_path, log, cmd_crypto=crypto,

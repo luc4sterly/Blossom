@@ -264,6 +264,9 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 movable = vol.readbytes('/private/movable.sed')
                 self.assertEqual((len(movable), movable[:4]), (0x120, b'SEED'))
                 self.assertEqual(movable[0x108:0x110], bytes(8))
+                lfcs = vol.readbytes('/rw/sys/LocalFriendCodeSeed_B')
+                self.assertEqual((len(lfcs), lfcs), (0x110, movable[0x08:0x118]))
+                self.assertEqual(lfcs[:0x100], mknand.self_sign(lfcs[0x100:]))
                 si = vol.readbytes('/rw/sys/SecureInfo_A')
                 self.assertEqual((len(si), si[0x100], si[0x102:0x104]), (0x111, 2, b'EW'))
                 self.assertEqual(si[:0x100], mknand.self_sign(si[0x100:]))
@@ -376,6 +379,7 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                     movable = m.fs.readbytes('/private/movable.sed')
                     cmd = m.fs.readbytes('/title/00040130/00008002/content/cmd/00000001.cmd')
                     self.assertEqual(m.fs.readbytes('/rw/sys/SecureInfo_A')[0x100], 1)
+                    self.assertEqual(m.fs.readbytes('/rw/sys/LocalFriendCodeSeed_B'), movable[0x08:0x118])
                     m.crypto.setup_sd_key(movable)
                     self.assertEqual(cmd, mknand.build_cmd(mknand._cmd_inputs(_FakeCIA(cia)), m.crypto))
                 finally:

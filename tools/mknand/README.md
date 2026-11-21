@@ -75,7 +75,7 @@ hecha antes de esto:
     --cias /ruta/a/11.17.0-50E.OLD/
 ```
 
-Además escribe `/rw/sys/SecureInfo_A` autofirmado con la región de la consola (`--region`, EUR
+También escribe `/rw/sys/LocalFriendCodeSeed_B` (la misma semilla firmada que lleva movable.sed, que cfg lee para GetLocalFriendCodeSeed). Además escribe `/rw/sys/SecureInfo_A` autofirmado con la región de la consola (`--region`, EUR
 por defecto; con `--fix-titles`, se reescribe si das `--region`). Sin él, cfg cae en otra región
 y NS pide el menú y los applets de esa región.
 `--movable new` sustituye el movable.sed de la imagen por uno nuevo, y `--movable none` lo quita
