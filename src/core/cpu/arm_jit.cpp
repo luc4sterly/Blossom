@@ -84,8 +84,23 @@ class ThreadIdCoprocessor final : public A32::Coprocessor
 
 }
 
+//dynarmic's translation and compilation, as its own profiler bucket. Always counted, so that the
+//watchdog can tell a compile storm from code that is already compiled.
+static void compile_hook(bool entering)
+{
+    if (entering)
+    {
+        Profiler::counters[Profiler::JIT_COMPILES]++;
+        if (Profiler::enabled)
+            Profiler::enter(Profiler::JIT_COMPILE);
+    }
+    else if (Profiler::enabled)
+        Profiler::leave();
+}
+
 ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
 {
+    A32::compile_hook = compile_hook;
     page_table = std::make_unique<JitPageTable>();
     cpu.cp15->set_jit_page_table(page_table.get());
 

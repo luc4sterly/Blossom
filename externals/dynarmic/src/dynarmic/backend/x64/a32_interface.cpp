@@ -30,6 +30,8 @@
 
 namespace Dynarmic::A32 {
 
+void (*compile_hook)(bool entering) = nullptr;
+
 using namespace Backend::X64;
 
 static RunCodeCallbacks GenRunCodeCallbacks(A32::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A32::UserConfig& conf) {
@@ -225,6 +227,13 @@ private:
         auto block = emitter.GetBasicBlock(descriptor);
         if (block)
             return *block;
+
+        if (compile_hook)
+            compile_hook(true);
+        SCOPE_EXIT {
+            if (compile_hook)
+                compile_hook(false);
+        };
 
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {

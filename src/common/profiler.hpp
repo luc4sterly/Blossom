@@ -32,6 +32,7 @@ enum Bucket
     JIT_FALLBACK,
     JIT_CODE_CHECK,
     JIT_GLUE,
+    JIT_COMPILE,
     BUCKET_COUNT
 };
 
@@ -46,6 +47,7 @@ enum Counter
     JIT_SLOW_WRITES,
     JIT_CHANGED_CHUNKS,
     SLICES,
+    JIT_COMPILES,
     SHORT_SLICES,
     COUNTER_COUNT
 };

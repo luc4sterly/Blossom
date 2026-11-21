@@ -17,6 +17,10 @@
 namespace Dynarmic {
 namespace A32 {
 
+/// Blossom: called with true before and false after dynarmic translates and compiles a block
+/// (profiling only; null by default).
+extern void (*compile_hook)(bool entering);
+
 class Jit final {
 public:
     explicit Jit(UserConfig conf);
