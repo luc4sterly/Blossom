@@ -27,7 +27,7 @@ void Scheduler::reset()
 
 void Scheduler::calculate_cycles_to_run()
 {
-    const static int MAX_CYCLES = 256;
+    const int MAX_CYCLES = max_cycles;
 
     cycles11_to_run = 0;
 

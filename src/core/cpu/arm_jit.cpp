@@ -336,7 +336,9 @@ void ARM_JIT::on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed)
         case 0x750: //Invalidate entire instruction cache
         case 0x752: //Invalidate instruction cache line (set/way)
         case 0x770: //Invalidate both caches
-            clear_cache();
+            //Only code whose memory changed since it was compiled needs to go
+            invalidate_changed_code();
+            Profiler::counters[Profiler::JIT_CACHE_CLEARS]++;
             break;
         case 0x751: //Invalidate instruction cache line (MVA)
             jit->InvalidateCacheRangeNow(value & ~0x1FU, 32);
@@ -355,22 +357,73 @@ void ARM_JIT::cache_page(uint32_t vaddr)
     uint64_t mem = (uint64_t)cpu.tlb_map[page];
     if ((mem & TLB_READ) && !(mem & TLB_MMIO))
     {
-        bool read_only = !(mem & TLB_WRITE) || code_chunks.count(page);
+        bool read_only = !(mem & TLB_WRITE) || code_chunks.count(code_key(page));
         page_table->set(page, (uint8_t*)(mem & ~TLB_FLAGS), read_only);
     }
 }
 
-void ARM_JIT::mark_code(uint32_t vaddr)
+static uint32_t hash_chunk(const uint8_t* p)
+{
+    uint64_t h = 0xCBF29CE484222325ULL;
+    for (int i = 0; i < 64; i += 8)
+    {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x100000001B3ULL;
+    }
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+void ARM_JIT::mark_code(uint32_t vaddr, const uint8_t* host_page)
 {
     uint32_t page = vaddr >> 12;
-    auto it = code_chunks.find(page);
-    if (it == code_chunks.end())
+    auto it = code_chunks.find(code_key(page));
+    if (it == code_chunks.end() || it->second.host != host_page)
     {
-        it = code_chunks.emplace(page, 0).first;
+        if (it == code_chunks.end())
+            it = code_chunks.emplace(code_key(page), CodePage{}).first;
+        else
+        {
+            //Same address space, page now mapped elsewhere: what was compiled from it is stale
+            jit->InvalidateCacheRangeNow(page << 12, 0x1000);
+            Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
+        }
+        it->second.chunks = 0;
+        it->second.host = host_page;
         //The page may be cached as writable; the next access caches it read-only
         page_table->invalidate_page(page);
     }
-    it->second |= 1ULL << ((vaddr >> 6) & 0x3F);
+    uint32_t chunk = (vaddr >> 6) & 0x3F;
+    CodePage& cp = it->second;
+    if (!(cp.chunks & (1ULL << chunk)))
+    {
+        cp.chunks |= 1ULL << chunk;
+        cp.hashes[chunk] = hash_chunk(host_page + chunk * 64);
+    }
+}
+
+void ARM_JIT::invalidate_changed_code()
+{
+    for (auto it = code_chunks.begin(); it != code_chunks.end(); )
+    {
+        CodePage& cp = it->second;
+        uint32_t page = (uint32_t)(it->first & 0xFFFFF);
+        for (uint32_t chunk = 0; chunk < 64; chunk++)
+        {
+            if (!(cp.chunks & (1ULL << chunk)))
+                continue;
+            if (hash_chunk(cp.host + chunk * 64) != cp.hashes[chunk])
+            {
+                jit->InvalidateCacheRangeNow((page << 12) + chunk * 64, 64);
+                Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
+                cp.chunks &= ~(1ULL << chunk);
+            }
+        }
+        if (!cp.chunks)
+            it = code_chunks.erase(it);
+        else
+            ++it;
+    }
 }
 
 void ARM_JIT::check_code_write(uint32_t vaddr, uint32_t size)
@@ -378,7 +431,7 @@ void ARM_JIT::check_code_write(uint32_t vaddr, uint32_t size)
     uint32_t last = vaddr + size - 1;
     for (uint32_t page = vaddr >> 12; page <= (last >> 12); page++)
     {
-        auto it = code_chunks.find(page);
+        auto it = code_chunks.find(code_key(page));
         if (it == code_chunks.end())
             continue;
         uint32_t start = std::max(vaddr, page << 12);
@@ -386,11 +439,12 @@ void ARM_JIT::check_code_write(uint32_t vaddr, uint32_t size)
         uint64_t mask = 0;
         for (uint32_t chunk = (start >> 6) & 0x3F; chunk <= ((end >> 6) & 0x3F); chunk++)
             mask |= 1ULL << chunk;
-        if (it->second & mask)
+        if (it->second.chunks & mask)
         {
             //InvalidateCacheRange would only take effect once Run returns, and the block can
             //branch into the stale code before that
             jit->InvalidateCacheRangeNow(start, end - start + 1);
+            it->second.chunks &= ~mask;
             Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
         }
     }
@@ -473,7 +527,7 @@ std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
         const uint8_t* ptr = (const uint8_t*)(mem & ~TLB_FLAGS);
         uint32_t word;
         std::memcpy(&word, &ptr[vaddr & 0xFFF], sizeof(word));
-        mark_code(vaddr);
+        mark_code(vaddr, ptr);
         return word;
     }
     catch (...)

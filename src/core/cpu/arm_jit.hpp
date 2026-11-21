@@ -103,7 +103,19 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         //write to a chunk with code invalidates the blocks that cover it. The ARM11 kernel and the
         //boot ROMs write code with the caches off and no cache maintenance, so I-cache operations
         //alone are not enough.
-        std::unordered_map<uint32_t, uint64_t> code_chunks;
+        //
+        //Records are per address space (context id) and virtual page, and keep a hash of every
+        //chunk as it was compiled: a full I-cache invalidate (which the kernel does often) then
+        //only drops the chunks whose memory changed, instead of the whole code cache.
+        struct CodePage
+        {
+            uint64_t chunks = 0;
+            const uint8_t* host = nullptr;
+            uint32_t hashes[64];
+        };
+        std::unordered_map<uint64_t, CodePage> code_chunks;
+        uint64_t code_key(uint32_t page) const { return ((uint64_t)last_context_id << 20) | page; }
+        void invalidate_changed_code();
 
         void update_context();
         void sync_to_jit();
@@ -113,7 +125,7 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         void clear_cache();
 
         void cache_page(uint32_t vaddr);
-        void mark_code(uint32_t vaddr);
+        void mark_code(uint32_t vaddr, const uint8_t* host_page);
         void check_code_write(uint32_t vaddr, uint32_t size);
         void record_data_abort(uint32_t vaddr, bool is_write);
         void record_exception();

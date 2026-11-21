@@ -224,8 +224,15 @@ bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
     for (int i = 0; i < 4; i++)
         arm11[i].set_jit_enabled(arm11_jit, exclusive_monitor.get());
     arm9.set_jit_enabled(arm9_jit);
-    printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s\n", arm11_jit ? "JIT" : "interpreter",
-           arm9_jit ? "JIT" : "interpreter");
+    //Entering and leaving the JIT costs about as much as running a short slice, so with the JIT
+    //the cores run 4x longer between switches (about 340 ARM11 cycles instead of 85).
+    //BLOSSOM_SLICE=<quantum cycles> overrides it (256 is the interpreter's value).
+    int slice = (arm11_jit || arm9_jit) ? 1024 : 256;
+    if (const char* env = std::getenv("BLOSSOM_SLICE"))
+        slice = atoi(env) > 0 ? atoi(env) : slice;
+    scheduler.set_max_cycles(slice);
+    printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s, slice %d\n", arm11_jit ? "JIT" : "interpreter",
+           arm9_jit ? "JIT" : "interpreter", slice);
     return true;
 }
 
