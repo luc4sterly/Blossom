@@ -44,6 +44,8 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         //Called after the interpreter executed an MCR to CP15. op = (CRn << 8) | (CRm << 4) | opc2
         void on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed);
 
+        uint64_t take_fallback_count() { uint64_t n = fallback_count; fallback_count = 0; return n; }
+
         // dynarmic callbacks
         std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr vaddr) override;
 
@@ -77,6 +79,9 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         std::unique_ptr<Dynarmic::A32::Jit> jit;
 
         int cycle_target;
+        uint64_t fallback_count = 0;
+        //BLOSSOM_JIT_SAFE bit 0: no page table, every access goes through the callbacks
+        bool no_page_table = false;
 
         //Things that happened inside Run and are handled once it returns
         std::exception_ptr pending_exception;

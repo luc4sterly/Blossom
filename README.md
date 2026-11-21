@@ -95,7 +95,10 @@ Si algo arranca con el intérprete y no con el JIT, prueba `jit11` y luego `inte
 Variables de diagnóstico:
 
 * `BLOSSOM_PROFILE=1` imprime en stderr, por frame, el tiempo que se lleva cada parte
-  (ARM11, ARM9, GPU, DSP…) y contadores del JIT.
+  (ARM11, ARM9, GPU, DSP…), contadores del JIT y dónde está cada núcleo (línea `[CPU]`).
+  Con `BLOSSOM_PROFILE=2` añade registros, ciclos e instrucciones interpretadas de cada núcleo.
+* `BLOSSOM_JIT_SAFE=<n>` (depuración) apaga partes del JIT, sumando: 1 = sin tabla de páginas
+  (toda la memoria por callbacks), 2 = una instrucción por bloque, 4 = sin optimizaciones.
 * `BLOSSOM_TRACE_SVC=1` vuelve a sacar la traza de SVC, IPC e interrupciones por stdout.
   Viene apagada porque escribir en consola en cada SVC frena más que el propio emulador.
 * `BLOSSOM_TRACE_MMIO=1` saca por stderr cada acceso de los ARM11 a registros de E/S (los bucles

@@ -158,6 +158,7 @@ ARM_CPU::ARM_CPU(Emulator* e, int id, CP15* cp15, VFP* vfp) : e(e), id(id), cp15
 {
     in_jit = false;
     test_console = false;
+    debug_cycles = 0;
 }
 
 ARM_CPU::~ARM_CPU() = default;
@@ -193,6 +194,17 @@ bool ARM_CPU::set_jit_enabled(bool enabled, Dynarmic::ExclusiveMonitor* monitor)
 bool ARM_CPU::is_jit_enabled() const
 {
     return jit != nullptr;
+}
+
+void ARM_CPU::take_debug_stats(uint64_t& fallbacks, uint64_t& cycles)
+{
+    fallbacks = 0;
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        fallbacks = jit->take_fallback_count();
+#endif
+    cycles = debug_cycles;
+    debug_cycles = 0;
 }
 
 void ARM_CPU::set_test_console(bool enabled)
@@ -305,6 +317,7 @@ void ARM_CPU::run(int cycles)
     if (jit)
     {
         jit->run(cycles);
+        debug_cycles += cycles_ran;
         return;
     }
 #endif
@@ -356,6 +369,7 @@ void ARM_CPU::run(int cycles)
         prefetch_abort(p.vaddr);
     }
 
+    debug_cycles += cycles_ran;
     if (int_pending)
         int_check();
 }

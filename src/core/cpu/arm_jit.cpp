@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <dynarmic/interface/A32/coprocessor.h>
@@ -119,6 +120,22 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
     {
         cp15_thread_id = std::make_shared<ThreadIdCoprocessor>(cpu.cp15->get_thread_regs());
         conf.coprocessors[15] = cp15_thread_id;
+    }
+
+    //Debug switches to narrow down JIT bugs, as a sum of bits:
+    //1 = no page table (every memory access goes through the callbacks), 2 = one instruction per
+    //block, 4 = no dynarmic optimizations
+    if (const char* env = getenv("BLOSSOM_JIT_SAFE"))
+    {
+        int safe = atoi(env);
+        if (safe & 1)
+            no_page_table = true;
+        if (safe & 2)
+            conf.max_block_instructions = 1;
+        if (safe & 4)
+            conf.optimizations = Dynarmic::no_optimizations;
+        if (safe)
+            fprintf(stderr, "[ARM%d] JIT debug switches: %d\n", cpu.id, safe);
     }
 
     jit = std::make_unique<A32::Jit>(conf);
@@ -319,6 +336,8 @@ void ARM_JIT::on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed)
 
 void ARM_JIT::cache_page(uint32_t vaddr)
 {
+    if (no_page_table)
+        return;
     uint32_t page = vaddr >> 12;
     uint64_t mem = (uint64_t)cpu.tlb_map[page];
     if ((mem & TLB_READ) && !(mem & TLB_MMIO))
@@ -537,6 +556,7 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     (void)pc;
     (void)num_instructions; //Always 1 with interpret_system_instructions
     Profiler::counters[Profiler::JIT_FALLBACKS]++;
+    fallback_count++;
 
     try
     {

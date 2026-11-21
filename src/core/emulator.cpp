@@ -324,10 +324,25 @@ void Emulator::run()
     {
         //Where each core is at the end of the frame: a core stuck in a loop shows the same PCs
         //frame after frame. PC is the next instruction (the interpreter's PC minus 4, or 2 in Thumb).
+        //BLOSSOM_PROFILE=2 adds the registers, cycles run and interpreter fallbacks of each core.
+        static const bool verbose = [] {
+            const char* env = getenv("BLOSSOM_PROFILE");
+            return env && atoi(env) >= 2;
+        }();
         auto core_state = [](ARM_CPU& cpu) {
             PSR_Flags* cpsr = cpu.get_CPSR();
+            uint64_t fallbacks, cycles;
+            cpu.take_debug_stats(fallbacks, cycles);
             fprintf(stderr, " $%08X/%02X%s%s", cpu.get_PC() - (cpsr->thumb ? 2 : 4), cpsr->mode,
                     cpsr->thumb ? "T" : "", cpu.is_halted() ? " halt" : "");
+            if (verbose)
+            {
+                fprintf(stderr, " [cyc %llu fb %llu cpsr $%08X", (unsigned long long)cycles,
+                        (unsigned long long)fallbacks, cpsr->get());
+                for (int r = 0; r < 15; r++)
+                    fprintf(stderr, " r%d=%08X", r, cpu.get_register(r));
+                fprintf(stderr, "]");
+            }
         };
         fprintf(stderr, "[CPU] frame %d: arm11", frames);
         for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
