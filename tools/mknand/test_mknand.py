@@ -263,6 +263,8 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 self.assertTrue(vol.exists('/dbs/import.db'))
                 movable = vol.readbytes('/private/movable.sed')
                 self.assertEqual((len(movable), movable[:4]), (0x120, b'SEED'))
+                self.assertEqual(movable[0x108:0x110], bytes(8))
+                self.assertEqual(movable[0x08:0x108], mknand.self_sign(movable[0x108:0x118]))
                 cmd = vol.readbytes(f'{base}/cmd/00000001.cmd')
                 crypto = mknand.make_crypto(b9_path)
                 crypto.setup_sd_key(movable)

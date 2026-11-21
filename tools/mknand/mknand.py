@@ -306,12 +306,16 @@ CMD_KEYSLOT = 0x30  # pyctr's CMACSDNAND: keyY comes from movable.sed
 
 
 def build_movable(rng: random.Random) -> bytes:
-    """A 0x120-byte movable.sed without CMAC: "SEED", fake LocalFriendCodeSeed_B, random keyY."""
+    """
+    A 0x120-byte movable.sed without CMAC: "SEED", a self-signed LocalFriendCodeSeed_B and a random
+    keyY. LFCS_B is a 0x100 RSA signature over 0x10 bytes (8 zero bytes + the 8-byte LFCS), and
+    the LFCS is also the first half of the keyY. Process9 checks that signature at boot, so it is
+    self-signed like the NCSD header and needs --dev-unsigned.
+    """
     sed = bytearray(0x120)
     sed[0:4] = b'SEED'
-    sed[0x08:0x108] = rng.randbytes(0x100)   # LFCS RSA signature (fake, only matters online)
-    sed[0x108:0x110] = rng.randbytes(8)      # LFCS data
-    sed[0x110:0x120] = rng.randbytes(0x10)   # keyY for keyslots 0x30/0x34/0x3A
+    sed[0x110:0x120] = rng.randbytes(0x10)   # keyY for keyslots 0x30/0x34/0x3A; [0:8] is the LFCS
+    sed[0x08:0x108] = self_sign(bytes(sed[0x108:0x118]))
     return bytes(sed)
 
 
@@ -544,26 +548,35 @@ def update_dbs(image: str, boot9_path: str, cia_paths: list[str], log=print) -> 
 
 
 def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
-               keyslot: int = CMD_KEYSLOT) -> int:
+               keyslot: int = CMD_KEYSLOT, movable: str = 'keep') -> int:
     """
     Write content/cmd/00000001.cmd for every installed title in an existing image, and
     /private/movable.sed if there is none (its keyY is the CMAC key). Returns how many cmds.
+    movable: 'keep' uses the image's movable.sed if it has one; 'new' always writes a fresh
+    self-signed one; 'none' removes it and signs the cmds with an all-zero keyY (for testing).
     """
     from pyctr.type.cia import CIAReader
     m = MountedCTRNAND(image, boot9_path, writable=True)
     written = 0
     try:
-        path = m.find('/private', 'movable.sed') if m.fs.isdir('/private') else None
-        if path is None:
-            m.fs.makedirs('/private', recreate=True)
-            movable = build_movable(random.Random(os.urandom(32)))
+        m.fs.makedirs('/private', recreate=True)
+        path = m.find('/private', 'movable.sed')
+        if movable == 'none':
+            if path is not None:
+                m.fs.remove(path)
+                log(f'removed {path}')
+            sed = bytes(0x10)
+        elif path is None or movable == 'new':
+            if path is not None:
+                m.fs.remove(path)
+            sed = build_movable(random.Random(os.urandom(32)))
             with m.fs.openbin('/private/movable.sed', 'w') as f:
-                f.write(movable)
+                f.write(sed)
             log('created /private/movable.sed')
         else:
-            movable = m.fs.readbytes(path)
-            log(f'using {path} ({len(movable):#x} bytes)')
-        m.crypto.setup_sd_key(movable)
+            sed = m.fs.readbytes(path)
+            log(f'using {path} ({len(sed):#x} bytes)')
+        m.crypto.setup_sd_key(sed)
         for cia_path in cia_paths:
             with CIAReader(cia_path, crypto=make_crypto(boot9_path), load_contents=False) as cia:
                 tid = cia.tmd.title_id
@@ -879,6 +892,9 @@ def main(argv=None) -> int:
     p.add_argument('--fix-titles', metavar='IMAGE',
                    help='do not build: write content/cmd/00000001.cmd for the --cias titles already '
                         'in an image (and /private/movable.sed if missing)')
+    p.add_argument('--movable', choices=['keep', 'new', 'none'], default='keep',
+                   help='with --fix-titles: keep the image\'s movable.sed (default), write a new '
+                        'self-signed one, or remove it')
     p.add_argument('--cmd-keyslot', default='0x30',
                    help='AES-CMAC keyslot for .cmd files (default 0x30; 0x0B to try the NAND DB key)')
     p.add_argument('--explain', metavar='IMAGE',
@@ -893,6 +909,7 @@ def main(argv=None) -> int:
         e.add_argument('--update-dbs')
         e.add_argument('--fix-titles')
         e.add_argument('--cmd-keyslot', default='0x30')
+        e.add_argument('--movable', choices=['keep', 'new', 'none'], default='keep')
         e.add_argument('--cias', nargs='+')
         eargs, _ = e.parse_known_args(argv)
         try:
@@ -901,7 +918,7 @@ def main(argv=None) -> int:
                     print('error: --fix-titles needs --cias', file=sys.stderr)
                     return 1
                 n = fix_titles(eargs.fix_titles, eargs.boot9, find_cias(eargs.cias),
-                               keyslot=int(eargs.cmd_keyslot, 0))
+                               keyslot=int(eargs.cmd_keyslot, 0), movable=eargs.movable)
                 print(f'wrote {n} cmd files')
                 if not (eargs.update_dbs or eargs.inspect_dbs):
                     return 0
