@@ -1,4 +1,3 @@
-#include "common/heap_stats.hpp"
 #include "common/profiler.hpp"
 #ifdef BLOSSOM_HAS_JIT
 #include <dynarmic/interface/exclusive_monitor.h>
@@ -309,8 +308,6 @@ void Emulator::watchdog_report(const char* reason, long mb)
     }
     if (!arm9.is_halted())
         arm9.debug_report();
-    fprintf(stderr, "[WATCHDOG] heap: %lld MB in %lld blocks, largest block %lld MB\n",
-            (long long)(heap_bytes.load() >> 20), (long long)heap_blocks.load(), (long long)(heap_largest.load() >> 20));
     fprintf(stderr, "[WATCHDOG] counters this frame:");
     for (int i = 0; i < Profiler::COUNTER_COUNT; i++)
         fprintf(stderr, " %llu", (unsigned long long)Profiler::counters[i]);
