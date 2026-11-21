@@ -192,6 +192,21 @@ void ARM_JIT::request_exit()
     jit->HaltExecution(HALT_STOP);
 }
 
+//A slice is a few hundred cycles, so a Run that makes this many memory callbacks or fallbacks has
+//lost track of its cycle budget (a loop with no cycle check). Stop it so the other cores and the
+//scheduler get to run, and say where it happened.
+void ARM_JIT::note_callback()
+{
+    if (++callbacks_this_run == 65536)
+    {
+        static int warned = 0;
+        if (warned++ < 16)
+            fprintf(stderr, "[JIT] ARM%d ran past its cycle budget in one Run, stopping it at $%08X\n",
+                    cpu.id, jit->Regs()[15]);
+        jit->HaltExecution(HALT_STOP);
+    }
+}
+
 void ARM_JIT::end_slice()
 {
     jit->HaltExecution(HALT_STOP);
@@ -289,6 +304,7 @@ void ARM_JIT::run(int cycles)
     while (true)
     {
         cpu.in_jit = true;
+        callbacks_this_run = 0;
         jit->Run();
         cpu.in_jit = false;
         jit->ClearHalt(HALT_STOP | HALT_ABORT);
@@ -503,6 +519,7 @@ template <typename T, typename F>
 T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 {
     Profiler::counters[Profiler::JIT_SLOW_READS]++;
+    note_callback();
     Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
@@ -525,6 +542,7 @@ template <typename F>
 void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 {
     Profiler::counters[Profiler::JIT_SLOW_WRITES]++;
+    note_callback();
     Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
@@ -668,6 +686,7 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     (void)num_instructions; //Always 1 with interpret_system_instructions
     Profiler::counters[Profiler::JIT_FALLBACKS]++;
     fallback_count++;
+    note_callback();
     if (Profiler::enabled)
         fallback_pcs[pc]++;
     Profiler::Scope prof_scope(Profiler::JIT_FALLBACK);

@@ -43,6 +43,8 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
 
         //Asks Jit::Run to return after the current instruction and ends the slice
         void end_slice();
+        void note_callback();
+        uint32_t callbacks_this_run = 0;
 
         //PC inside the JIT, read from another thread by the watchdog (racy, diagnostics only)
         uint32_t live_pc() { return jit->Regs()[15]; }
