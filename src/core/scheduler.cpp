@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "common/exceptions.hpp"
 #include "core/scheduler.hpp"
 
 Scheduler::Scheduler()
@@ -82,6 +83,11 @@ void Scheduler::add_event(std::function<void(uint64_t)> func, int64_t cycles, ui
     closest_event_time = std::min(event.time_to_run, closest_event_time);
 
     events.push_back(event);
+
+    //Nothing schedules more than a handful of events at once; a runaway (a device rescheduling
+    //itself in a loop) would otherwise eat all memory before anything shows up
+    if (events.size() > 100000)
+        EmuException::die("[Scheduler] More than 100000 pending events, something is rescheduling itself in a loop");
 }
 
 void Scheduler::process_events()

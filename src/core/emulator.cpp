@@ -283,6 +283,19 @@ void Emulator::run()
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
         Profiler::counters[Profiler::SLICES]++;
+        //Memory guard: a runaway allocation inside one frame used to take the whole machine's
+        //memory before failing. BLOSSOM_MAX_RAM_MB changes the limit (4096 MB by default).
+        if ((++memory_check_counter & 0x3FFF) == 0)
+        {
+            static const long max_mb = [] {
+                const char* env = getenv("BLOSSOM_MAX_RAM_MB");
+                return env ? atol(env) : 4096L;
+            }();
+            long mb = Profiler::resident_mb();
+            if (max_mb > 0 && mb > max_mb)
+                EmuException::die("[Emulator] Using %ld MB of memory (limit %ld MB) in frame %d, stopping",
+                                  mb, max_mb, frames);
+        }
         if (cycles11 < 64)
             Profiler::counters[Profiler::SHORT_SLICES]++;
 

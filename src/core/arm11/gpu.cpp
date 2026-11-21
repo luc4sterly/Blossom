@@ -506,7 +506,10 @@ void GPU::do_command_engine_dma(uint64_t index)
     printf("[GPU] Doing command engine DMA\n");
     printf("[GPU] Addr: $%08X Words: $%08X\n", cur_cmdlist_ptr, cur_cmdlist_size);
     //NOTE: Here, size is in units of words
-    while (cur_cmdlist_size && !cmdlist_jumped)
+    //The size is in words and every command takes at least two. A size that runs out in the middle
+    //of a command ends the list; counting down an unsigned size used to wrap around to 4G words
+    //and run whatever followed in memory (and schedule its DMAs) until memory ran out.
+    while (cur_cmdlist_size >= 2 && !cmdlist_jumped)
     {
         uint32_t param = e->arm11_read32(0, cur_cmdlist_ptr);
         uint32_t cmd_header = e->arm11_read32(0, cur_cmdlist_ptr + 4);
@@ -519,6 +522,14 @@ void GPU::do_command_engine_dma(uint64_t index)
         bool consecutive_writes = cmd_header >> 31;
 
         uint32_t extra_params[256];
+
+        if (extra_param_count + (extra_param_count & 0x1) > cur_cmdlist_size)
+        {
+            printf("[GPU] Command list ends inside a command ($%04X, %d extra words, %u left)\n",
+                   cmd_id, extra_param_count, cur_cmdlist_size);
+            cur_cmdlist_size = 0;
+            break;
+        }
 
         for (unsigned int i = 0; i < extra_param_count; i++)
         {

@@ -55,6 +55,8 @@ void init();
 void enter(Bucket b);
 void leave();
 void end_frame(int frame);
+//Resident memory of the process in MB, or -1 if unknown
+long resident_mb();
 
 class Scope
 {

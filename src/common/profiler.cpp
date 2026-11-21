@@ -8,8 +8,11 @@
 #include <unistd.h>
 #endif
 
+namespace Profiler
+{
+
 //Resident memory of the process in MB, or -1 if unknown
-static long resident_mb()
+long resident_mb()
 {
 #ifdef _WIN32
     PROCESS_MEMORY_COUNTERS pmc;
@@ -27,6 +30,8 @@ static long resident_mb()
         return -1;
     return resident * sysconf(_SC_PAGESIZE) / (1024 * 1024);
 #endif
+}
+
 }
 
 namespace Profiler
