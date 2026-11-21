@@ -389,6 +389,18 @@ uint32_t ARM_CPU::debug_pc()
     return gpr[15];
 }
 
+void ARM_CPU::debug_report()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+    {
+        jit->debug_report();
+        return;
+    }
+#endif
+    fprintf(stderr, "[WATCHDOG] ARM%d interp: pc $%08X%s cycles %d\n", id, gpr[15], halted ? " halt" : "", cycles_ran);
+}
+
 void ARM_CPU::end_slice()
 {
     slice_ended = true;

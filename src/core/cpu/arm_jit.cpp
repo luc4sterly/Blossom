@@ -10,6 +10,7 @@
 
 #include "common/exceptions.hpp"
 #include "common/profiler.hpp"
+#include "core/cpu/arm_disasm.hpp"
 #include "core/cpu/arm.hpp"
 #include "core/cpu/arm_jit.hpp"
 #include "core/cpu/cp15.hpp"
@@ -695,6 +696,40 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     //the slice, as on the interpreter.
     if (cpu.halted)
         jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::debug_report()
+{
+    const auto& r = jit->Regs();
+    uint32_t cpsr = jit->Cpsr();
+    bool thumb = cpsr & (1 << 5);
+    fprintf(stderr, "[WATCHDOG] ARM%d jit: pc $%08X cpsr $%08X %s cycles %d/%d ctx $%08X | r0 $%08X r1 $%08X "
+            "r2 $%08X r3 $%08X r12 $%08X sp $%08X lr $%08X | contexts %zu code pages %zu\n",
+            cpu.id, r[15], cpsr, cpu.in_jit ? "in Run" : "outside Run", cpu.cycles_ran, cycle_target,
+            context, r[0], r[1], r[2], r[3], r[12], r[13], r[14], context_ids.size(), code_chunks.size());
+    int step = thumb ? 2 : 4;
+    for (int i = -4; i <= 3; i++)
+    {
+        uint32_t pc = r[15] + i * step;
+        uint64_t mem = (uint64_t)cpu.tlb_map[pc >> 12];
+        if (!(mem & TLB_READ) || (mem & TLB_MMIO))
+            continue;
+        const uint8_t* ptr = (const uint8_t*)(mem & ~TLB_FLAGS) + (pc & 0xFFF);
+        std::string text;
+        if (thumb)
+        {
+            uint16_t instr;
+            std::memcpy(&instr, ptr, 2);
+            text = ARM_Disasm::disasm_thumb(cpu, instr);
+        }
+        else
+        {
+            uint32_t instr;
+            std::memcpy(&instr, ptr, 4);
+            text = ARM_Disasm::disasm_arm(cpu, instr);
+        }
+        fprintf(stderr, "[WATCHDOG]   %s$%08X  %s\n", i == 0 ? "> " : "  ", pc, text.c_str());
+    }
 }
 
 void ARM_JIT::print_fallback_stats()

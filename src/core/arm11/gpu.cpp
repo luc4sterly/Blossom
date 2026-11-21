@@ -523,7 +523,7 @@ void GPU::do_command_engine_dma(uint64_t index)
 
         uint32_t extra_params[256];
 
-        if (extra_param_count + (extra_param_count & 0x1) > cur_cmdlist_size)
+        if ((uint32_t)(extra_param_count + (extra_param_count & 0x1)) > cur_cmdlist_size)
         {
             printf("[GPU] Command list ends inside a command ($%04X, %d extra words, %u left)\n",
                    cmd_id, extra_param_count, cur_cmdlist_size);
