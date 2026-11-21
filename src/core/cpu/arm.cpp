@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <sstream>
 #include <utility>
@@ -26,15 +27,30 @@ static int trace_svc_level()
     return level;
 }
 
+//BLOSSOM_SKIP_SETUP=1: when a process reads cfg block 0x00110000 (system setup required) or
+//0x000D0000 (accepted EULA version), the reply is patched to "setup done" and EULA 0x7F7F, as
+//Azahar does, so NS boots the HOME Menu instead of System Settings' first-time setup.
+static bool skip_setup_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_SKIP_SETUP");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
 static bool trace_svc_enabled()
 {
-    return trace_svc_level() >= 1;
+    return trace_svc_level() >= 1 || skip_setup_enabled();
 }
 
 static bool trace_svc_lines()
 {
     return trace_svc_level() == 1;
 }
+
+struct CfgRequest { uint32_t block, size; };
+static std::deque<CfgRequest> cfg_requests;
 
 //(pid, name) -> (what, count)
 static std::map<std::pair<int, std::string>, std::map<std::string, uint64_t>> svc_stats;
@@ -570,17 +586,20 @@ void ARM_CPU::swi()
             //Result of this thread's last service request: the reply sits in its command buffer
             //when it next does an SVC (if it hasn't written a new request with another command
             //id yet). Failures are counted as "FAIL service:header=result".
-            static std::map<std::pair<int, uint32_t>, std::pair<std::string, uint32_t>> pending_reply;
+            struct PendingReply { std::string service; uint32_t header, block, size, ptr; };
+            static std::map<std::pair<int, uint32_t>, PendingReply> pending_reply;
             auto rep_it = pending_reply.find({pid, tls});
             if (rep_it != pending_reply.end())
             {
                 uint32_t reply_header = read32(tls + 0x80);
                 uint32_t result = read32(tls + 0x84);
-                if ((reply_header >> 16) == (rep_it->second.second >> 16) && (result & 0x80000000))
+                const PendingReply& pr = rep_it->second;
+                bool same_cmd = (reply_header >> 16) == (pr.header >> 16);
+                if (same_cmd && (result & 0x80000000))
                 {
                     char what[96];
-                    snprintf(what, sizeof(what), "FAIL %s:%08X=%08X", rep_it->second.first.c_str(),
-                             rep_it->second.second, result);
+                    snprintf(what, sizeof(what), "FAIL %s:%08X=%08X", pr.service.c_str(),
+                             pr.header, result);
                     count_svc(pid, procname, what);
                     if (trace_svc_level() >= 2)
                     {
@@ -594,9 +613,24 @@ void ARM_CPU::swi()
             if (op == 0x32)
             {
                 auto named = service_handles.find({pid, gpr[0]});
-                pending_reply[{pid, tls}] = {named != service_handles.end() ? named->second : "?",
-                                             read32(tls + 0x80)};
                 uint32_t hdr = read32(tls + 0x80);
+                PendingReply pr{named != service_handles.end() ? named->second : "?", hdr, 0, 0, 0};
+                //cfg GetConfigInfoBlk2 / GetConfigInfoBlk8 (cfg:s) / GetConfigInfoBlk8 (cfg:i):
+                //size, block ID, buffer descriptor, buffer pointer
+                if ((hdr == 0x00010082 || hdr == 0x04010082 || hdr == 0x08010082)
+                    && pr.service.rfind("cfg:", 0) == 0)
+                {
+                    pr.size = read32(tls + 0x84);
+                    pr.block = read32(tls + 0x88);
+                    pr.ptr = read32(tls + 0x90);
+                    if (skip_setup_enabled())
+                    {
+                        cfg_requests.push_back({pr.block, pr.size});
+                        if (cfg_requests.size() > 64)
+                            cfg_requests.pop_front();
+                    }
+                }
+                pending_reply[{pid, tls}] = pr;
                 if (hdr == 0x00010800)
                 {
                     //err:f ThrowFatalError: type, result code, PC, PID, title IDs
@@ -606,6 +640,46 @@ void ARM_CPU::swi()
                     fprintf(stderr, "[ERRF] PID%d[%s] type %d result $%08X pc $%08X pid $%X "
                             "title %08X %08X app %08X %08X\n", pid, procname.c_str(), w[0] & 0xFF,
                             w[1], w[2], w[3], w[5], w[4], w[7], w[6]);
+                }
+            }
+            //The patch is applied on cfg's side, when it replies (svcReplyAndReceive): the block
+            //data is in the mapped buffer, which is still mapped in cfg, and the requester hasn't
+            //run yet. The reply only gives the size, so match it with the oldest request of that size.
+            if (op == 0x4F && skip_setup_enabled() && procname.rfind("cfg", 0) == 0 && gpr[3])
+            {
+                uint32_t hdr = read32(tls + 0x80);
+                if (hdr == 0x00010042 || hdr == 0x04010042 || hdr == 0x08010042)
+                {
+                    uint32_t result = read32(tls + 0x84);
+                    uint32_t size = read32(tls + 0x88) >> 4;
+                    uint32_t ptr = read32(tls + 0x8C);
+                    for (auto req = cfg_requests.begin(); req != cfg_requests.end(); ++req)
+                    {
+                        if (req->size != size)
+                            continue;
+                        uint32_t block = req->block;
+                        cfg_requests.erase(req);
+                        if (result != 0)
+                            break;
+                        try
+                        {
+                            if (block == 0x00110000 && size >= 1)
+                            {
+                                write8(ptr, 1);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x00110000 -> setup done\n");
+                            }
+                            else if (block == 0x000D0000 && size >= 2)
+                            {
+                                write8(ptr, 0x7F);
+                                write8(ptr + 1, 0x7F);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x000D0000 -> EULA 7F.7F\n");
+                            }
+                        }
+                        catch (const EmuException::ARMDataAbort&)
+                        {
+                        }
+                        break;
+                    }
                 }
             }
             if (op != 0x32)
