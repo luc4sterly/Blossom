@@ -115,6 +115,31 @@ class EndToEndWithFakeKeys(unittest.TestCase):
             self.assertEqual(hashes['sha256(nand_cid)'], hashlib.sha256(result.cid).hexdigest())
 
 
+class TitleDB(unittest.TestCase):
+    def test_entries_found_through_hash_table_and_directory(self):
+        import titledb
+        fs = titledb.BDRI(b'NANDTDB\0')
+        tids = [0x0004013000008002 + i * 0x100 for i in range(200)]
+        for t in tids:
+            fs.add(titledb.TitleInfo(title_id=t, size=0x8000, version=1))
+        for t in tids:
+            self.assertIsNotNone(fs.lookup(t))
+        self.assertEqual(sorted(fs.read_titles()), sorted(tids))
+        self.assertIsNone(fs.lookup(0x0004013000009999))
+
+    @unittest.skipIf(pyctr_engine is None, 'pyctr is not installed')
+    def test_diff_reads_back_with_valid_hashes(self):
+        import titledb
+        from pyctr.crypto import CryptoEngine
+        from pyctr.type.save.diff import DIFF
+        from pyctr.type.save.partdesc.ivfc import IVFCLevel4Reader
+        fs = titledb.BDRI(b'NANDTDB\0')
+        fs.add(titledb.TitleInfo(title_id=0x0004013000008002, size=0x8000))
+        raw = titledb.build_diff(bytes(fs.img))
+        diff = DIFF(io.BytesIO(raw), crypto=CryptoEngine(setup_b9_keys=False))
+        self.assertEqual(IVFCLevel4Reader(diff.partitions[0].ivfc_hash_tree).read(), bytes(fs.img))
+
+
 class _FakeRecord:
     def __init__(self, cid, cindex, size):
         self.id, self.cindex, self.size = cid, cindex, size
@@ -123,6 +148,8 @@ class _FakeRecord:
 class _FakeTMD:
     def __init__(self, tid):
         self.title_id, self.title_version = tid, 0x2C10
+        self.save_size = 0x4000
+        self._u_title_type = b'\0\0\0\x40'
 
 
 class _FakeCIA:
@@ -184,6 +211,8 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 self.assertEqual(vol.readbytes(f'{base}/0000002b.app'), fake.data[1])
                 for d in mknand.CTRNAND_DIRS:
                     self.assertTrue(vol.isdir(d), d)
+                self.assertTrue(vol.exists('/dbs/import.db'))
+                self.assertEqual(mknand.verify_title_db(vol.readbytes('/dbs/title.db'), result.titles), [])
                 vol.close()
 
                 nand = NAND(out, crypto=mknand.make_crypto(b9_path))

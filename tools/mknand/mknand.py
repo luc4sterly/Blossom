@@ -30,6 +30,8 @@ import struct
 import sys
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 NAND_MEDIA_UNIT = 0x200
 OTP_MAGIC = 0xDEADB00F
 
@@ -258,6 +260,7 @@ class InstalledTitle:
     version: int
     size: int
     contents: list[str]
+    info: 'object' = None  # titledb.TitleInfo for dbs/title.db
 
 
 def is_twl_title(title_id: str) -> bool:
@@ -276,15 +279,35 @@ def find_cias(paths: list[str]) -> list[str]:
     return sorted(found)
 
 
+def roundup(x: int, align: int) -> int:
+    return (x + align - 1) // align * align
+
+
+def _extdata_id(cia, boot9_path: str) -> int:
+    """Extdata ID from content 0's extended header (0 if there is none or it can't be decrypted)."""
+    try:
+        from pyctr.type.ncch import NCCHReader, NCCHSection
+        with cia.open_raw_section(0) as src:
+            ncch = NCCHReader(src, crypto=make_crypto(boot9_path), closefd=False)
+            if not ncch.check_for_extheader():
+                return 0
+            with ncch.open_raw_section(NCCHSection.ExtendedHeader) as ex:
+                ex.seek(0x230)
+                return int.from_bytes(ex.read(8), 'little')
+    except Exception:
+        return 0
+
+
 def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> list[InstalledTitle]:
     """
     Install CTR titles from CIAs into a mounted CTRNAND file system (a pyfs-style object).
 
     Each title goes to /title/<high>/<low>/content/ as 00000000.tmd plus one <content id>.app per
     content in the CIA, with the title-key layer removed (NCCH encryption stays, as on a console).
-    The title, ticket and import databases in /dbs are not written yet.
+    Returns what dbs/title.db needs for each title.
     """
     from pyctr.type.cia import CIAReader, CIASection
+    from titledb import TitleInfo
 
     installed = []
     for path in cia_paths:
@@ -300,33 +323,84 @@ def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> 
                 dst.write(src.read())
             total = 0
             names = []
+            content0_head = b''
             for record in cia.content_info:
+                if record.cindex == 0:
+                    with cia.open_raw_section(0) as src:
+                        content0_head = src.read(0x200)
                 name = f'{record.id.lower()}.app'
                 with cia.open_raw_section(record.cindex) as src, volume.openbin(f'{base}/{name}', 'w') as dst:
                     while chunk := src.read(0x100000):
                         dst.write(chunk)
                 total += record.size
                 names.append(name)
-            installed.append(InstalledTitle(tid, int(cia.tmd.title_version), total, names))
+            tmd = cia.tmd
+            on_disk = sum(roundup(r.size, 0x8000) for r in cia.content_info)
+            with cia.open_raw_section(CIASection.TitleMetadata) as src:
+                on_disk += roundup(len(src.read()), 0x8000)
+            info = TitleInfo(
+                title_id=int(tid, 16),
+                size=on_disk,
+                title_type=int.from_bytes(getattr(tmd, '_u_title_type', b'\0\0\0\x40'), 'big') or 0x40,
+                version=int(tmd.title_version),
+                tmd_id=0,
+                has_save=bool(tmd.save_size),
+                has_manual=any(r.cindex == 1 for r in cia.content_info),
+                extdata_id=_extdata_id(cia, boot9_path),
+                product_code=content0_head[0x150:0x160].rstrip(b'\0') if content0_head[0x100:0x104] == b'NCCH' else b'',
+                content0_id=next((int(r.id, 16) for r in cia.content_info if r.cindex == 0), 0xFFFFFFFF),
+                random=random.getrandbits(32),
+            )
+            installed.append(InstalledTitle(tid, int(tmd.title_version), total, names, info))
     return installed
 
 
-def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x100000) -> None:
+def write_title_databases(volume, infos, crypto) -> None:
+    """dbs/title.db with one entry per installed title, and an empty dbs/import.db."""
+    import titledb
+    with volume.openbin('/dbs/title.db', 'w') as f:
+        f.write(titledb.build_database(titledb.DB_TITLE, infos, crypto))
+    with volume.openbin('/dbs/import.db', 'w') as f:
+        f.write(titledb.build_database(titledb.DB_IMPORT, [], crypto))
+
+
+def allocated_ranges(volume_head: bytes) -> list[tuple[int, int]]:
     """
-    Copy a plaintext FAT volume into an encrypted partition file object. The FAT area is always
-    copied; after it, all-zero chunks are skipped (free clusters can hold anything).
+    Byte ranges (offset, length) of a FAT16 volume that hold data: the reserved sector, FATs and
+    root directory, plus every allocated cluster. `volume_head` must cover at least the FAT area.
     """
-    zero = bytes(chunk)
+    bps, spc, reserved, nfats, root_entries = struct.unpack_from('<HBHBH', volume_head, 0x0B)
+    fat_sectors = struct.unpack_from('<H', volume_head, 0x16)[0]
+    meta_len = (reserved + nfats * fat_sectors) * bps + root_entries * 32
+    cluster = spc * bps
+    fat = volume_head[reserved * bps:(reserved + fat_sectors) * bps]
+    ranges = [(0, meta_len)]
+    for n in range(2, len(fat) // 2):
+        if struct.unpack_from('<H', fat, n * 2)[0]:
+            off = meta_len + (n - 2) * cluster
+            if ranges[-1][0] + ranges[-1][1] == off:
+                ranges[-1] = (ranges[-1][0], ranges[-1][1] + cluster)
+            else:
+                ranges.append((off, cluster))
+    return ranges
+
+
+def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x400000) -> None:
+    """
+    Copy a plaintext FAT16 volume into an encrypted partition file object: the FAT area and every
+    allocated cluster. Free clusters are left as they are (they can hold anything).
+    """
     with open(src_path, 'rb') as src:
-        dst.seek(0)
-        dst.write(src.read(meta_len))
-        pos = meta_len
-        src.seek(pos)
-        while data := src.read(chunk):
-            if data != zero[:len(data)]:
-                dst.seek(pos)
+        head = src.read(meta_len)
+        for off, length in allocated_ranges(head):
+            src.seek(off)
+            dst.seek(off)
+            while length > 0:
+                data = src.read(min(chunk, length))
+                if not data:
+                    break
                 dst.write(data)
-            pos += len(data)
+                length -= len(data)
 
 
 def write_fat_volume(nand, section, entry, label: bytes, volume_id: int, fill, out_path: str) -> None:
@@ -428,6 +502,7 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
                 volume.makedirs(d, recreate=True)
             if cia_paths:
                 titles = install_titles(volume, cia_paths, boot9_path, log)
+            write_title_databases(volume, [t.info for t in titles], crypto)
 
         volumes = [
             (NANDSection.TWLNAND, TWL_MBR_ENTRIES[0], b'TWL-NAND', fill_twln),
@@ -447,6 +522,34 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
         f.write(self_sign(signed_part))
 
     return BuildResult(otp_plain=otp_plain, otp_enc=otp_enc, cid=cid, titles=titles)
+
+
+def verify_title_db(raw: bytes, titles: list[InstalledTitle]) -> list[str]:
+    """Read dbs/title.db back through pyctr's DIFF reader (checks every IVFC hash) and look up each title."""
+    import io
+    import titledb
+    from pyctr.crypto import CryptoEngine
+    from pyctr.type.save.diff import DIFF
+    from pyctr.type.save.partdesc.ivfc import IVFCLevel4Reader
+
+    problems = []
+    diff = DIFF(io.BytesIO(raw), crypto=CryptoEngine(setup_b9_keys=False))
+    lv4 = IVFCLevel4Reader(diff.partitions[0].ivfc_hash_tree, verify=True).read()
+    if b'\xDD' * 0x200 in lv4:
+        problems.append('title.db: IVFC hash check failed')
+    fs = titledb.BDRI(b'')
+    fs.img = bytearray(lv4)
+    if lv4[0:8] != titledb.DB_TITLE[1]:
+        problems.append('title.db: wrong magic')
+    for t in titles:
+        entry = fs.lookup(int(t.title_id, 16))
+        if entry is None:
+            problems.append(f'title.db: {t.title_id} not found')
+        elif entry != t.info.to_bytes():
+            problems.append(f'title.db: {t.title_id} entry differs')
+    if len(fs.read_titles()) != len(titles):
+        problems.append('title.db: root directory lists the wrong number of titles')
+    return problems
 
 
 def verify_titles(nand, path: str, titles: list[InstalledTitle]) -> list[str]:
@@ -469,6 +572,7 @@ def verify_titles(nand, path: str, titles: list[InstalledTitle]) -> list[str]:
                 size = sum(volume.getsize(f'{base}/{n}') for n in t.contents if volume.exists(f'{base}/{n}'))
                 if size != t.size:
                     problems.append(f'{t.title_id}: contents are {size} bytes, expected {t.size}')
+            problems += verify_title_db(volume.readbytes('/dbs/title.db'), titles)
         finally:
             volume.close()
     finally:

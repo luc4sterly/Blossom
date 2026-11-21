@@ -3,7 +3,7 @@
 Genera una imagen de NAND de Old 3DS que Blossom puede arrancar con el boot9 emulado,
 sin tener un dump de una consola real. Es la fase 1 del estudio de la NAND sintética:
 llega hasta que el boot9 acepte el OTP, la cabecera y el FIRM, y salte al NATIVE_FIRM.
-Con `--cias` instala además los títulos de sistema en CTRNAND (sin las bases de datos de `dbs/` todavía).
+Con `--cias` instala además los títulos de sistema en CTRNAND y escribe `dbs/title.db` e `import.db`.
 
 ## Qué mete en la imagen
 
@@ -16,6 +16,7 @@ Con `--cias` instala además los títulos de sistema en CTRNAND (sin las bases d
 | TWL MBR + TWLN + TWLP | MBR estándar y FAT16 vacías, cifradas con la clave TWL derivada del OTP |
 | AGB_FIRM save | Vacía |
 | FIRM0 / FIRM1 | NATIVE_FIRM de Old 3DS (`0004013800000002`), cifrado con el keyslot 0x06 |
+| `dbs/title.db`, `dbs/import.db` | Escritos desde cero: contenedor DIFF (árbol IVFC), sistema de archivos BDRI con una entrada de 0x80 bytes por título y CMAC `CTR-9DB0` con el keyslot 0x0B (derivado del OTP). Ver `titledb.py` |
 | CTR MBR + CTRNAND | MBR y FAT16, cifradas con el keyslot 0x04. Con `--cias`, `title/<alto>/<bajo>/content/00000000.tmd` y un `<id>.app` por contenido (sin la capa de title key; el cifrado NCCH se queda como en la consola) |
 
 Toda la criptografía (claves de consola a partir del OTP, contadores a partir del CID, title key
@@ -68,7 +69,8 @@ probar en Blossom con tu propio `boot9.bin`.
 
 ## Lo que falta (fases siguientes)
 
-- Bases de datos de CTRNAND (`dbs/title.db`, `ticket.db`, `import.db`, `certs.db`) con su CMAC.
+- `dbs/ticket.db` y `dbs/certs.db`.
+- Ficheros `.cmd` de los títulos, si Process9 los pide.
 - Títulos TWL en TWLN.
 - `movable.sed`, `SecureInfo_A` autofirmado, HWCAL.
 - New 3DS: necesita el sector secreto 0x96 de una consola real.
