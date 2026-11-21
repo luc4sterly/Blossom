@@ -64,8 +64,8 @@ una vez:
 ### Archivos .cmd y movable.sed
 
 Cada título lleva `content/cmd/00000001.cmd`, la lista de contenidos instalados que Process9
-consulta antes de abrir el `.tmd`. Su AES-CMAC usa el keyslot 0x30, cuya keyY sale de
-`/private/movable.sed`; mknand crea uno falso (sin CMAC) con keyY aleatoria y la firma RSA de
+consulta antes de abrir el `.tmd`. Su AES-CMAC usa el keyslot 0x0B, el mismo de las bases de
+datos (probado: con 0x30 Process9 da 0xD9004586). mknand también crea `/private/movable.sed`, falso (sin CMAC) con keyY aleatoria y la firma RSA de
 la LocalFriendCodeSeed autofirmada como la cabecera NCSD (Process9 la comprueba al arrancar, así
 que hace falta `--dev-unsigned`). Para una imagen
 hecha antes de esto:
@@ -75,7 +75,9 @@ hecha antes de esto:
     --cias /ruta/a/11.17.0-50E.OLD/
 ```
 
-Si Process9 rechaza los .cmd, prueba `--cmd-keyslot 0x0B` (la clave de las bases de datos de NAND).
+Además escribe `/rw/sys/SecureInfo_A` autofirmado con la región de la consola (`--region`, EUR
+por defecto; con `--fix-titles`, se reescribe si das `--region`). Sin él, cfg cae en otra región
+y NS pide el menú y los applets de esa región.
 `--movable new` sustituye el movable.sed de la imagen por uno nuevo, y `--movable none` lo quita
 (los .cmd se firman entonces con una keyY a cero; sirve para aislar problemas).
 

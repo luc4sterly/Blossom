@@ -302,7 +302,24 @@ def _extdata_id(cia, boot9_path: str) -> int:
 # installed contents of a NAND title. Layout and CMAC inputs from ihaveamac/custom-install (MIT).
 CMD_MISSING_ID = b'\xff\xff\xff\xff'
 CMD_MISSING_CMAC = b'MISSING CONTENT!'
-CMD_KEYSLOT = 0x30  # pyctr's CMACSDNAND: keyY comes from movable.sed
+CMD_KEYSLOT = 0x0B  # same key as the NAND databases; 0x30 (movable.sed keyY) is what SD uses
+
+
+REGIONS = {'JPN': 0, 'USA': 1, 'EUR': 2, 'AUS': 3, 'CHN': 4, 'KOR': 5, 'TWN': 6}
+SERIAL_PREFIX = {'JPN': b'CJ', 'USA': b'CW', 'EUR': b'EW', 'AUS': b'EW', 'CHN': b'CHN', 'KOR': b'KW', 'TWN': b'AW'}
+
+
+def build_secureinfo(region: str, rng: random.Random) -> bytes:
+    """
+    /rw/sys/SecureInfo_A (0x111 bytes): RSA signature, region byte, one unknown byte and a
+    0xF-byte serial. cfg takes the console region from it. The signature over 0x100..0x111 is
+    self-signed like the NCSD header, so it needs --dev-unsigned.
+    """
+    body = bytearray(0x11)
+    body[0] = REGIONS[region]
+    serial = SERIAL_PREFIX[region] + b'%09d' % rng.randrange(10 ** 9)
+    body[2:2 + len(serial)] = serial
+    return self_sign(bytes(body)) + bytes(body)
 
 
 def build_movable(rng: random.Random) -> bytes:
@@ -548,12 +565,13 @@ def update_dbs(image: str, boot9_path: str, cia_paths: list[str], log=print) -> 
 
 
 def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
-               keyslot: int = CMD_KEYSLOT, movable: str = 'keep') -> int:
+               keyslot: int = CMD_KEYSLOT, movable: str = 'keep', region: str | None = None) -> int:
     """
     Write content/cmd/00000001.cmd for every installed title in an existing image, and
     /private/movable.sed if there is none (its keyY is the CMAC key). Returns how many cmds.
     movable: 'keep' uses the image's movable.sed if it has one; 'new' always writes a fresh
     self-signed one; 'none' removes it and signs the cmds with an all-zero keyY (for testing).
+    /rw/sys/SecureInfo_A is written if missing (EUR) or whenever `region` is given.
     """
     from pyctr.type.cia import CIAReader
     m = MountedCTRNAND(image, boot9_path, writable=True)
@@ -577,6 +595,14 @@ def fix_titles(image: str, boot9_path: str, cia_paths: list[str], log=print,
             sed = m.fs.readbytes(path)
             log(f'using {path} ({len(sed):#x} bytes)')
         m.crypto.setup_sd_key(sed)
+        m.fs.makedirs('/rw/sys', recreate=True)
+        si = m.find('/rw/sys', 'SecureInfo_A')
+        if si is None or region is not None:
+            if si is not None:
+                m.fs.remove(si)
+            with m.fs.openbin('/rw/sys/SecureInfo_A', 'w') as f:
+                f.write(build_secureinfo(region or 'EUR', random.Random(os.urandom(32))))
+            log(f'wrote /rw/sys/SecureInfo_A ({region or "EUR"})')
         for cia_path in cia_paths:
             with CIAReader(cia_path, crypto=make_crypto(boot9_path), load_contents=False) as cia:
                 tid = cia.tmd.title_id
@@ -647,7 +673,7 @@ class BuildResult:
 
 def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
                cia_paths: list[str] | None = None, log=print,
-               cmd_keyslot: int = CMD_KEYSLOT) -> BuildResult:
+               cmd_keyslot: int = CMD_KEYSLOT, region: str = 'EUR') -> BuildResult:
     from pyctr.type.nand import NAND, NANDSection
 
     check_firm(firm)
@@ -709,6 +735,8 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
             nonlocal titles
             for d in CTRNAND_DIRS:
                 volume.makedirs(d, recreate=True)
+            with volume.openbin('/rw/sys/SecureInfo_A', 'w') as f:
+                f.write(build_secureinfo(region, rng))
             movable = build_movable(rng)
             with volume.openbin('/private/movable.sed', 'w') as f:
                 f.write(movable)
@@ -895,8 +923,10 @@ def main(argv=None) -> int:
     p.add_argument('--movable', choices=['keep', 'new', 'none'], default='keep',
                    help='with --fix-titles: keep the image\'s movable.sed (default), write a new '
                         'self-signed one, or remove it')
-    p.add_argument('--cmd-keyslot', default='0x30',
-                   help='AES-CMAC keyslot for .cmd files (default 0x30; 0x0B to try the NAND DB key)')
+    p.add_argument('--cmd-keyslot', default='0x0B',
+                   help='AES-CMAC keyslot for .cmd files (default 0x0B, the NAND DB key)')
+    p.add_argument('--region', choices=sorted(REGIONS), default=None,
+                   help='console region in SecureInfo_A (default EUR; with --fix-titles, rewrites it)')
     p.add_argument('--explain', metavar='IMAGE',
                    help='do not build: print the hashes boot9 computes for an existing image, '
                         'to compare with a SHA log from Blossom')
@@ -908,7 +938,8 @@ def main(argv=None) -> int:
         e.add_argument('--inspect-dbs')
         e.add_argument('--update-dbs')
         e.add_argument('--fix-titles')
-        e.add_argument('--cmd-keyslot', default='0x30')
+        e.add_argument('--cmd-keyslot', default='0x0B')
+        e.add_argument('--region', choices=sorted(REGIONS), default=None)
         e.add_argument('--movable', choices=['keep', 'new', 'none'], default='keep')
         e.add_argument('--cias', nargs='+')
         eargs, _ = e.parse_known_args(argv)
@@ -918,7 +949,8 @@ def main(argv=None) -> int:
                     print('error: --fix-titles needs --cias', file=sys.stderr)
                     return 1
                 n = fix_titles(eargs.fix_titles, eargs.boot9, find_cias(eargs.cias),
-                               keyslot=int(eargs.cmd_keyslot, 0), movable=eargs.movable)
+                               keyslot=int(eargs.cmd_keyslot, 0), movable=eargs.movable,
+                               region=eargs.region)
                 print(f'wrote {n} cmd files')
                 if not (eargs.update_dbs or eargs.inspect_dbs):
                     return 0
@@ -954,7 +986,7 @@ def main(argv=None) -> int:
 
         cias = find_cias(args.cias) if args.cias else []
         result = build_nand(args.out, args.boot9, firm, args.seed, cias,
-                            cmd_keyslot=int(args.cmd_keyslot, 0))
+                            cmd_keyslot=int(args.cmd_keyslot, 0), region=args.region or 'EUR')
         if cias:
             print(f'installed {len(result.titles)} titles into CTRNAND')
         device_id = struct.unpack_from('<I', result.otp_plain, 4)[0]

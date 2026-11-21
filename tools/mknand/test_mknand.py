@@ -264,9 +264,13 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 movable = vol.readbytes('/private/movable.sed')
                 self.assertEqual((len(movable), movable[:4]), (0x120, b'SEED'))
                 self.assertEqual(movable[0x108:0x110], bytes(8))
+                si = vol.readbytes('/rw/sys/SecureInfo_A')
+                self.assertEqual((len(si), si[0x100], si[0x102:0x104]), (0x111, 2, b'EW'))
+                self.assertEqual(si[:0x100], mknand.self_sign(si[0x100:]))
                 self.assertEqual(movable[0x08:0x108], mknand.self_sign(movable[0x108:0x118]))
                 cmd = vol.readbytes(f'{base}/cmd/00000001.cmd')
                 crypto = mknand.make_crypto(b9_path)
+                crypto.setup_keys_from_otp(result.otp_enc)
                 crypto.setup_sd_key(movable)
                 self.assertEqual(cmd, mknand.build_cmd(mknand._cmd_inputs(fake), crypto))
                 self.assertEqual(mknand.verify_title_db(vol.readbytes('/dbs/title.db'), result.titles), [])
@@ -341,11 +345,12 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 m.save()
                 m.close()
 
-                self.assertEqual(mknand.fix_titles(out, b9_path, [cia], log=lambda *_: None), 1)
+                self.assertEqual(mknand.fix_titles(out, b9_path, [cia], log=lambda *_: None, region='USA'), 1)
                 m = mknand.MountedCTRNAND(out, b9_path)
                 try:
                     movable = m.fs.readbytes('/private/movable.sed')
                     cmd = m.fs.readbytes('/title/00040130/00008002/content/cmd/00000001.cmd')
+                    self.assertEqual(m.fs.readbytes('/rw/sys/SecureInfo_A')[0x100], 1)
                     m.crypto.setup_sd_key(movable)
                     self.assertEqual(cmd, mknand.build_cmd(mknand._cmd_inputs(_FakeCIA(cia)), m.crypto))
                 finally:
@@ -362,12 +367,13 @@ class CmdFormat(unittest.TestCase):
         from pyctr.crypto import CryptoEngine
         crypto = CryptoEngine(setup_b9_keys=False)
         key = bytes(range(16))
-        crypto.set_normal_key(0x30, key)
+        crypto.set_normal_key(0x0B, key)
         heads = [bytes([i]) * 0x100 for i in range(3)]
         cmd = mknand.build_cmd([(0, '0000000a', heads[0]), (2, '00000005', heads[2])], crypto)
         cmd_id, count, installed, one = struct.unpack_from('<IIII', cmd, 0)
         self.assertEqual((cmd_id, count, installed, one), (1, 3, 2, 1))
-        mac = lambda d: CMAC.new(key, d, ciphermod=AES).digest()
+        def mac(d):
+            return CMAC.new(key, d, ciphermod=AES).digest()
         self.assertEqual(cmd[0x10:0x20], mac(cmd[:0x10]))
         ids = [cmd[0x20 + 4 * i:0x24 + 4 * i] for i in range(3)]
         self.assertEqual(ids, [b'\x0a\0\0\0', b'\xff' * 4, b'\x05\0\0\0'])
