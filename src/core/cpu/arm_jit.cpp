@@ -140,6 +140,11 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
             fprintf(stderr, "[ARM%d] JIT debug switches: %d\n", cpu.id, safe);
     }
 
+    //The return stack buffer is off: with it, opening the HOME Menu made memory grow by GBs a second
+    //on the PC test (ARM11 core 1 returning through POP {..., PC} in user code), and that went away
+    //with only this bit cleared. Root cause unknown; the measured cost is about 2%.
+    conf.optimizations &= ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
+
     //BLOSSOM_JIT_OPT=<mask>: dynarmic optimizations to keep (OptimizationFlag bits: 1 block
     //linking, 2 return stack buffer, 4 fast dispatch, 8 get/set elimination, 16 constant
     //propagation, 32 misc IR). Debug aid to find which one breaks something.
