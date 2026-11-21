@@ -1,4 +1,13 @@
+#include <chrono>
 #include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#define BLOSSOM_PROFILER_TSC 1
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include "common/profiler.hpp"
@@ -49,8 +58,22 @@ using Clock = std::chrono::steady_clock;
 constexpr int MAX_DEPTH = 32;
 Bucket stack[MAX_DEPTH];
 int depth = 0;
-Clock::time_point last_switch;
-Clock::time_point frame_start;
+//Bucket switches happen ~1M times a frame, so they are timed with the TSC (a few ns) instead of
+//steady_clock, which costs about a microsecond on some Windows machines and was itself showing
+//up as "other". Ticks are converted to ms once a frame against steady_clock.
+using Tick = uint64_t;
+inline Tick ticks()
+{
+#ifdef BLOSSOM_PROFILER_TSC
+    return __rdtsc();
+#else
+    return (Tick)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+Tick last_switch;
+Tick frame_start;
+Clock::time_point frame_start_clock;
 double totals[BUCKET_COUNT];
 
 const char* counter_names[COUNTER_COUNT] =
@@ -105,10 +128,10 @@ double gaps[BUCKET_COUNT][BUCKET_COUNT];
 double gap_max;
 int gap_max_from, gap_max_to;
 
-void charge(Clock::time_point now, int next = -1)
+void charge(Tick now, int next = -1)
 {
     Bucket cur = depth ? stack[depth - 1] : OTHER;
-    double ms = std::chrono::duration<double, std::milli>(now - last_switch).count();
+    double ms = (double)(now - last_switch); //in ticks until end_frame converts
     totals[cur] += ms;
     if (!depth && next >= 0)
     {
@@ -135,14 +158,24 @@ void init()
         t = 0;
     for (uint64_t& c : counters)
         c = 0;
-    last_switch = frame_start = Clock::now();
+    last_switch = frame_start = ticks();
+    frame_start_clock = Clock::now();
+    if (enabled)
+    {
+        //How much the old timer cost per call, for comparison with the old profiles
+        auto t0 = Clock::now();
+        for (int i = 0; i < 1000; i++)
+            (void)Clock::now();
+        double ns = std::chrono::duration<double, std::nano>(Clock::now() - t0).count() / 1000.0;
+        std::fprintf(stderr, "[PROFILE] steady_clock::now() costs %.0f ns per call here\n", ns);
+    }
 }
 
 void enter(Bucket b)
 {
     if (foreign())
         return;
-    charge(Clock::now(), b);
+    charge(ticks(), b);
     if (depth < MAX_DEPTH)
         stack[depth] = b;
     depth++;
@@ -152,7 +185,7 @@ void leave()
 {
     if (foreign())
         return;
-    charge(Clock::now());
+    charge(ticks());
     if (depth > 0)
     {
         depth--;
@@ -165,9 +198,18 @@ void end_frame(int frame)
 {
     if (!enabled)
         return;
-    auto now = Clock::now();
+    Tick now = ticks();
+    auto now_clock = Clock::now();
     charge(now, OTHER); //a gap since the last bucket shows as "...>other"
-    double total = std::chrono::duration<double, std::milli>(now - frame_start).count();
+    double total = std::chrono::duration<double, std::milli>(now_clock - frame_start_clock).count();
+    //Convert the tick totals to ms
+    double ms_per_tick = now > frame_start ? total / (double)(now - frame_start) : 0.0;
+    for (double& t : totals)
+        t *= ms_per_tick;
+    for (auto& row : gaps)
+        for (double& g : row)
+            g *= ms_per_tick;
+    gap_max *= ms_per_tick;
     std::fprintf(stderr, "[PROFILE] frame %d: %.1f ms |", frame, total);
     for (int i = 0; i < BUCKET_COUNT; i++)
     {
@@ -210,6 +252,7 @@ void end_frame(int frame)
     foreign_calls = 0;
     gap_max = 0;
     frame_start = now;
+    frame_start_clock = now_clock;
 }
 
 const char* bucket_name(int bucket)
