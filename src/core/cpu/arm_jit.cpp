@@ -290,6 +290,7 @@ void ARM_JIT::run(int cycles)
         jit->Run();
         cpu.in_jit = false;
         jit->ClearHalt(HALT_STOP | HALT_ABORT);
+        Profiler::Scope prof_scope(Profiler::JIT_GLUE);
 
         sync_from_jit();
 
@@ -423,6 +424,7 @@ void ARM_JIT::mark_code(uint32_t vaddr, const uint8_t* host_page)
 
 void ARM_JIT::invalidate_changed_code()
 {
+    Profiler::Scope prof_scope(Profiler::JIT_CODE_CHECK);
     for (auto it = code_chunks.begin(); it != code_chunks.end(); )
     {
         CodePage& cp = it->second;
@@ -499,6 +501,7 @@ template <typename T, typename F>
 T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 {
     Profiler::counters[Profiler::JIT_SLOW_READS]++;
+    Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
         T value = read();
@@ -520,6 +523,7 @@ template <typename F>
 void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 {
     Profiler::counters[Profiler::JIT_SLOW_WRITES]++;
+    Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
         write();
@@ -539,6 +543,7 @@ void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 
 std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
 {
+    Profiler::Scope prof_scope(Profiler::JIT_MEMORY);
     try
     {
         uint32_t page = vaddr >> 12;
@@ -663,6 +668,7 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
     fallback_count++;
     if (Profiler::enabled)
         fallback_pcs[pc]++;
+    Profiler::Scope prof_scope(Profiler::JIT_FALLBACK);
 
     try
     {

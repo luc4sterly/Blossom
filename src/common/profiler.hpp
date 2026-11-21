@@ -22,6 +22,13 @@ enum Bucket
     WIFI,
     DMA_TIMERS,
     EVENTS,
+    //Inside the ARM time: JIT memory callbacks, interpreter fallbacks, code-change checks and the
+    //work between Jit::Run calls (exception entry, syncing state). What is left in ARM11/ARM9 is
+    //generated code and dynarmic's compiler.
+    JIT_MEMORY,
+    JIT_FALLBACK,
+    JIT_CODE_CHECK,
+    JIT_GLUE,
     BUCKET_COUNT
 };
 
