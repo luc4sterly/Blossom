@@ -1,4 +1,5 @@
 #include "common/profiler.hpp"
+#include "common/native_stack.hpp"
 #ifdef BLOSSOM_HAS_JIT
 #include <dynarmic/interface/exclusive_monitor.h>
 #endif
@@ -336,11 +337,13 @@ void Emulator::watchdog_loop()
         if (tick > 4 && mb - mb_1s_ago > 150 && now_growth - last_growth_report > 1000)
         {
             watchdog_report("memory grew by more than 150 MB in the last second", mb);
+            NativeStack::report(3, 150);
             last_growth_report = now_growth;
         }
         if (max_mb > 0 && mb > max_mb)
         {
             watchdog_report("memory limit passed, stopping", mb);
+            NativeStack::report(2, 200);
             //Twice, a second apart, to show what keeps running
             std::this_thread::sleep_for(std::chrono::seconds(1));
             watchdog_report("memory limit passed, stopping", Profiler::resident_mb());
@@ -359,6 +362,7 @@ void Emulator::watchdog_loop()
 void Emulator::run()
 {
     start_watchdog();
+    NativeStack::set_target_thread();
     i2c.update_time();
     printf("FRAME %d\n", frames);
 
