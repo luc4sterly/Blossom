@@ -14,12 +14,18 @@ namespace Dynarmic::Backend {
 
 template<typename ProgramCounterType>
 void BlockRangeInformation<ProgramCounterType>::AddRange(boost::icl::discrete_interval<ProgramCounterType> range, IR::LocationDescriptor location) {
+    const auto [it, inserted] = location_ranges.try_emplace(location, range);
+    if (!inserted) {
+        block_ranges.subtract(std::make_pair(it->second, std::set<IR::LocationDescriptor>{location}));
+        it->second = range;
+    }
     block_ranges.add(std::make_pair(range, std::set<IR::LocationDescriptor>{location}));
 }
 
 template<typename ProgramCounterType>
 void BlockRangeInformation<ProgramCounterType>::ClearCache() {
     block_ranges.clear();
+    location_ranges.clear();
 }
 
 template<typename ProgramCounterType>
@@ -33,7 +39,14 @@ tsl::robin_set<IR::LocationDescriptor> BlockRangeInformation<ProgramCounterType>
             }
         }
     }
-    // TODO: EFFICIENCY: Remove ranges that are to be erased.
+    for (const auto& descriptor : erase_locations) {
+        const auto it = location_ranges.find(descriptor);
+        if (it == location_ranges.end()) {
+            continue;
+        }
+        block_ranges.subtract(std::make_pair(it->second, std::set<IR::LocationDescriptor>{descriptor}));
+        location_ranges.erase(it);
+    }
     return erase_locations;
 }
 

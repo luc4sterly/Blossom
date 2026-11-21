@@ -64,3 +64,11 @@ These are passed through in the x64, arm64 and riscv64 address spaces.
 * `PopRSBHint` and `FastDispatchHint` terminals also check halts and the cycle count before
   jumping. Upstream jumps straight to the next block, so a guest loop made only of indirect
   branches (a BX to itself) never left `Jit::Run`.
+
+## Block range bookkeeping (backend/block_range_information.*)
+
+Upstream `InvalidateRanges` never takes invalidated blocks out of the interval map ("TODO:
+EFFICIENCY"). Each segment keeps a `std::set` of every block that ever covered it, and `AddRange`
+copies those sets when it splits segments. With the same addresses recompiled for many contexts
+(every 3DS process has .text at $00100000) this grew by GBs a second. Blossom remembers each live
+block's range and subtracts it on invalidation.

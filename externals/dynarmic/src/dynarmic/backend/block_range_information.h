@@ -6,6 +6,7 @@
 #pragma once
 
 #include <set>
+#include <unordered_map>
 
 #include <boost/icl/interval_map.hpp>
 #include <boost/icl/interval_set.hpp>
@@ -24,6 +25,11 @@ public:
 
 private:
     boost::icl::interval_map<ProgramCounterType, std::set<IR::LocationDescriptor>> block_ranges;
+    // Blossom: the range each live block was added with, so invalidated blocks can be taken out of
+    // block_ranges. Upstream never removes them: every segment kept the set of every block that ever
+    // covered it, and with code at the same addresses recompiled for many contexts (each 3DS process
+    // has .text at $00100000) the sets, copied on every AddRange, grew by GBs a second.
+    std::unordered_map<IR::LocationDescriptor, boost::icl::discrete_interval<ProgramCounterType>> location_ranges;
 };
 
 }  // namespace Dynarmic::Backend

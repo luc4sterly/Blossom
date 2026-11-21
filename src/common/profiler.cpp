@@ -15,9 +15,11 @@ namespace Profiler
 long resident_mb()
 {
 #ifdef _WIN32
-    PROCESS_MEMORY_COUNTERS pmc;
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
-        return (long)(pmc.WorkingSetSize >> 20);
+    //Private bytes (committed memory): the working set can stay small while Windows pages the
+    //process out, so it missed a leak that grew to GBs
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+        return (long)(pmc.PrivateUsage >> 20);
     return -1;
 #else
     long pages = 0, resident = 0;
