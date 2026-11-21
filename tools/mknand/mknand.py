@@ -358,6 +358,42 @@ def verify_nand(path: str, boot9_path: str, firm: bytes) -> list[str]:
     return problems
 
 
+def explain_hashes(path: str, boot9_path: str) -> list[tuple[str, str]]:
+    """
+    List the SHA hashes boot9 computes while booting this image, to compare against a SHA engine
+    log from Blossom. Every value comes from the image's own (fake) OTP and CID.
+    """
+    from pyctr.type.exefs import ExeFSReader as Reader
+
+    with open(path, 'rb') as f:
+        f.seek(0x200)
+        ex = Reader(f, closefd=False)
+        with ex.open('otp') as o:
+            otp_enc = o.read(0x100)
+        with ex.open('nand_cid') as c:
+            cid = c.read(0x10)
+        f.seek(0)
+        hdr = f.read(0x200)
+        f.seek(O3DS_PARTITIONS[2][2])
+        firm0_raw = f.read(0x100)
+
+    crypto = make_crypto(boot9_path)
+    crypto.setup_keys_from_otp(otp_enc)
+    otp_dec = crypto.otp_dec
+    return [
+        ('sha256(otp_dec[0:0xE0])  (OTP check, must equal otp_dec[0xE0:])', hashlib.sha256(otp_dec[:0xE0]).hexdigest()),
+        ('otp_dec[0xE0:0x100]      (stored OTP hash)', otp_dec[0xE0:].hex()),
+        ('sha256(otp_enc[0:0x90])  (New 3DS key sector key)', hashlib.sha256(otp_enc[:0x90]).hexdigest()),
+        ('sha256(otp_dec[0x90:0xAC] + boot9 data)  (console keyX/Y)',
+         hashlib.sha256(otp_dec[0x90:0xAC] + crypto.b9_extdata_otp).hexdigest()),
+        ('sha256(otp_enc[0:0xE0])  (OTP check, if the OTP was not decrypted)', hashlib.sha256(otp_enc[:0xE0]).hexdigest()),
+        ('sha256(nand_cid)         (CTR/FIRM counter)', hashlib.sha256(cid).hexdigest()),
+        ('sha1(nand_cid)           (TWL counter)', hashlib.sha1(cid).hexdigest()),
+        ('sha256(NCSD 0x100:0x200) (NCSD signature)', hashlib.sha256(hdr[0x100:0x200]).hexdigest()),
+        ('FIRM0 first 16 raw bytes (encrypted)', firm0_raw[:16].hex()),
+    ]
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description='Build a synthetic Old 3DS NAND for Blossom from your own boot9 and NATIVE_FIRM.',
@@ -370,6 +406,20 @@ def main(argv=None) -> int:
     p.add_argument('-o', '--out', default='nand_synth.bin', help='output image (default: nand_synth.bin)')
     p.add_argument('--seed', help='make the fake OTP/CID reproducible from this text')
     p.add_argument('--no-verify', action='store_true', help='skip re-reading the image after building it')
+    p.add_argument('--explain', metavar='IMAGE',
+                   help='do not build: print the hashes boot9 computes for an existing image, '
+                        'to compare with a SHA log from Blossom')
+    if argv is None:
+        argv = sys.argv[1:]
+    if '--explain' in argv:
+        # --explain only needs --boot9; the FIRM source is not required.
+        e = argparse.ArgumentParser()
+        e.add_argument('--boot9', required=True)
+        e.add_argument('--explain', required=True)
+        eargs, _ = e.parse_known_args(argv)
+        for label, value in explain_hashes(eargs.explain, eargs.boot9):
+            print(f'{value}  {label}')
+        return 0
     args = p.parse_args(argv)
 
     try:

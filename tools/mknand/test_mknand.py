@@ -104,6 +104,10 @@ class EndToEndWithFakeKeys(unittest.TestCase):
             self.assertEqual(found[b'nand_cid'], result.cid)
             self.assertNotEqual(result.otp_enc[:4], b'\x0f\xb0\xad\xde')  # stored encrypted
 
+            hashes = dict((label.split()[0], value) for label, value in mknand.explain_hashes(out, b9_path))
+            self.assertEqual(hashes['sha256(otp_dec[0:0xE0])'], hashes['otp_dec[0xE0:0x100]'])
+            self.assertEqual(hashes['sha256(nand_cid)'], hashlib.sha256(result.cid).hexdigest())
+
 
 if __name__ == '__main__':
     unittest.main()
