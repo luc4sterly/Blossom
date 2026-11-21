@@ -182,6 +182,17 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 self.assertEqual(vol.readbytes(f'{base}/00000000.tmd'), fake.data[-1])
                 self.assertEqual(vol.readbytes(f'{base}/0000001a.app'), fake.data[0])
                 self.assertEqual(vol.readbytes(f'{base}/0000002b.app'), fake.data[1])
+                for d in mknand.CTRNAND_DIRS:
+                    self.assertTrue(vol.isdir(d), d)
+                vol.close()
+
+                nand = NAND(out, crypto=mknand.make_crypto(b9_path))
+                with nand.open_twl_partition(0) as src, open(vol_path, 'wb') as dst:
+                    dst.write(src.read())
+                nand.close()
+                vol = PyFatFS(vol_path)
+                for d in mknand.TWLN_DIRS:
+                    self.assertTrue(vol.isdir(d), d)
                 vol.close()
         finally:
             cia_mod.CIAReader = real

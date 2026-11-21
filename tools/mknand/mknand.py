@@ -64,6 +64,12 @@ CTR_MBR_ENTRIES = [
 
 FIRM_PART_SIZE = 0x400000
 
+# Top-level folders a retail console has on each partition. Process9 mounts these at boot and
+# crashed on an empty TWLN root (null pointer right after reading the root directory).
+TWLN_DIRS = ['/import', '/progress', '/shared1', '/shared2', '/sys', '/ticket', '/title', '/tmp']
+TWLP_DIRS = ['/photo']
+CTRNAND_DIRS = ['/data', '/dbs', '/fixdata', '/private', '/ro', '/rw', '/rw/sys', '/ticket', '/title', '/tmp']
+
 # DER prefix of a PKCS#1 v1.5 DigestInfo for SHA-256.
 SHA256_DIGESTINFO = bytes.fromhex('3031300d060960864801650304020105000420')
 
@@ -323,6 +329,32 @@ def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x100
             pos += len(data)
 
 
+def write_fat_volume(nand, section, entry, label: bytes, volume_id: int, fill, out_path: str) -> None:
+    """Format a plaintext FAT16 copy of one partition, let `fill` populate it, encrypt it into place."""
+    from pyctr.fileio import SubsectionIO
+    from pyfatfs.PyFatFS import PyFatFS
+
+    lba, count = entry[4], entry[5]
+    data, meta_len = build_fat16_boot_and_tables(count, label, volume_id)
+    tmp_path = out_path + '.volume.tmp'
+    try:
+        with open(tmp_path, 'wb') as f:
+            f.truncate(count * NAND_MEDIA_UNIT)
+            f.write(data)
+        volume = PyFatFS(tmp_path)
+        try:
+            fill(volume)
+        finally:
+            volume.close()
+        with nand.open_raw_section(section) as part:
+            dst = SubsectionIO(part, lba * NAND_MEDIA_UNIT, count * NAND_MEDIA_UNIT)
+            write_volume_encrypted(tmp_path, dst, meta_len)
+            dst.close()
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 @dataclass
 class BuildResult:
     otp_plain: bytes
@@ -380,41 +412,30 @@ def build_nand(out_path: str, boot9_path: str, firm: bytes, seed: str | None,
             with nand.open_raw_section(section) as f:
                 f.write(firm)
 
-        volumes = [
-            (NANDSection.TWLNAND, TWL_MBR_ENTRIES[0], b'TWL-NAND'),
-            (NANDSection.TWLNAND, TWL_MBR_ENTRIES[1], b'TWL-PHOTO'),
-        ]
-        for section, entry, label in volumes:
-            lba, count = entry[4], entry[5]
-            data, _ = build_fat16_boot_and_tables(count, label, rng.getrandbits(32))
-            with nand.open_raw_section(section) as f:
-                f.seek(lba * NAND_MEDIA_UNIT)
-                f.write(data)
-
-        # CTRNAND: format and fill a plaintext copy, then encrypt it into place.
         titles = []
-        lba, count = CTR_MBR_ENTRIES[0][4], CTR_MBR_ENTRIES[0][5]
-        data, meta_len = build_fat16_boot_and_tables(count, b'CTR-NAND', rng.getrandbits(32))
-        tmp_path = out_path + '.ctrnand.tmp'
-        try:
-            with open(tmp_path, 'wb') as f:
-                f.truncate(count * NAND_MEDIA_UNIT)
-                f.write(data)
+
+        def fill_twln(volume):
+            for d in TWLN_DIRS:
+                volume.makedirs(d, recreate=True)
+
+        def fill_twlp(volume):
+            for d in TWLP_DIRS:
+                volume.makedirs(d, recreate=True)
+
+        def fill_ctrnand(volume):
+            nonlocal titles
+            for d in CTRNAND_DIRS:
+                volume.makedirs(d, recreate=True)
             if cia_paths:
-                from pyfatfs.PyFatFS import PyFatFS
-                volume = PyFatFS(tmp_path)
-                try:
-                    titles = install_titles(volume, cia_paths, boot9_path, log)
-                finally:
-                    volume.close()
-            with nand.open_raw_section(NANDSection.CTRNAND) as part:
-                from pyctr.fileio import SubsectionIO
-                dst = SubsectionIO(part, lba * NAND_MEDIA_UNIT, count * NAND_MEDIA_UNIT)
-                write_volume_encrypted(tmp_path, dst, meta_len)
-                dst.close()
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                titles = install_titles(volume, cia_paths, boot9_path, log)
+
+        volumes = [
+            (NANDSection.TWLNAND, TWL_MBR_ENTRIES[0], b'TWL-NAND', fill_twln),
+            (NANDSection.TWLNAND, TWL_MBR_ENTRIES[1], b'TWL-PHOTO', fill_twlp),
+            (NANDSection.CTRNAND, CTR_MBR_ENTRIES[0], b'CTR-NAND', fill_ctrnand),
+        ]
+        for section, entry, label, fill in volumes:
+            write_fat_volume(nand, section, entry, label, rng.getrandbits(32), fill, out_path)
     finally:
         nand.close()
 
