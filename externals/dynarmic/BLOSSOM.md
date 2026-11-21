@@ -38,9 +38,18 @@ New `UserConfig` / `TranslationOptions` fields:
 * `fast_cp15_thread_id`: with the flag above, MRC p15, 0, Rd, c13, c0, {2,3,4} (thread id registers)
   stays compiled and goes through the configured CP15 coprocessor.
 * `max_block_instructions`: caps a block's length. Without it, zero-filled memory translates into
-  huge blocks of `andeq r0, r0, r0`.
+  huge blocks of `andeq r0, r0, r0`. A block cut by the cap ends with `LinkBlock` to the next
+  instruction (upstream only sets a terminal when the loop ends for one of its own reasons).
 * `page_table_read_only_bit0`: bit 0 of a page table entry marks the page read-only. Fast-path
   writes (`EmitVAddrLookup` with `is_write`) to such a page fall back to the write callback, which
   lets the embedder see writes to code pages and to MMU-protected pages.
 
 These are passed through in the x64, arm64 and riscv64 address spaces.
+
+## Immediate invalidation
+
+* `Jit::InvalidateCacheRangeNow` (x64; the other backends fall back to the deferred call): unlinks
+  the blocks in a range at once, so it works from a memory callback. `InvalidateCacheRange` only
+  acts when `Run` returns, and a `CacheInvalidation` halt is only noticed at the end of a block, so
+  code that rewrote an instruction and then branched to it ran the stale block. Blossom uses it for
+  writes to pages it has compiled code from, and for CP15 "invalidate I-cache line by MVA".

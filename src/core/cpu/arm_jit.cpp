@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -136,6 +137,7 @@ void ARM_JIT::reset()
     jit->ClearExclusiveState();
     page_table->invalidate_all();
     context_ids.clear();
+    code_chunks.clear();
     last_context_key = 0;
     last_context_id = ~0U;
     context = 0;
@@ -162,6 +164,8 @@ void ARM_JIT::request_exit()
 void ARM_JIT::clear_cache()
 {
     jit->ClearCache();
+    //Pages stay read-only in the shadow table until their next slow write, which is harmless
+    code_chunks.clear();
     Profiler::counters[Profiler::JIT_CACHE_CLEARS]++;
 }
 
@@ -305,7 +309,7 @@ void ARM_JIT::on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed)
             clear_cache();
             break;
         case 0x751: //Invalidate instruction cache line (MVA)
-            jit->InvalidateCacheRange(value & ~0x1FU, 32);
+            jit->InvalidateCacheRangeNow(value & ~0x1FU, 32);
             Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
             break;
         default:
@@ -318,7 +322,46 @@ void ARM_JIT::cache_page(uint32_t vaddr)
     uint32_t page = vaddr >> 12;
     uint64_t mem = (uint64_t)cpu.tlb_map[page];
     if ((mem & TLB_READ) && !(mem & TLB_MMIO))
-        page_table->set(page, (uint8_t*)(mem & ~TLB_FLAGS), !(mem & TLB_WRITE));
+    {
+        bool read_only = !(mem & TLB_WRITE) || code_chunks.count(page);
+        page_table->set(page, (uint8_t*)(mem & ~TLB_FLAGS), read_only);
+    }
+}
+
+void ARM_JIT::mark_code(uint32_t vaddr)
+{
+    uint32_t page = vaddr >> 12;
+    auto it = code_chunks.find(page);
+    if (it == code_chunks.end())
+    {
+        it = code_chunks.emplace(page, 0).first;
+        //The page may be cached as writable; the next access caches it read-only
+        page_table->invalidate_page(page);
+    }
+    it->second |= 1ULL << ((vaddr >> 6) & 0x3F);
+}
+
+void ARM_JIT::check_code_write(uint32_t vaddr, uint32_t size)
+{
+    uint32_t last = vaddr + size - 1;
+    for (uint32_t page = vaddr >> 12; page <= (last >> 12); page++)
+    {
+        auto it = code_chunks.find(page);
+        if (it == code_chunks.end())
+            continue;
+        uint32_t start = std::max(vaddr, page << 12);
+        uint32_t end = std::min(last, (page << 12) | 0xFFF);
+        uint64_t mask = 0;
+        for (uint32_t chunk = (start >> 6) & 0x3F; chunk <= ((end >> 6) & 0x3F); chunk++)
+            mask |= 1ULL << chunk;
+        if (it->second & mask)
+        {
+            //InvalidateCacheRange would only take effect once Run returns, and the block can
+            //branch into the stale code before that
+            jit->InvalidateCacheRangeNow(start, end - start + 1);
+            Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
+        }
+    }
 }
 
 void ARM_JIT::record_data_abort(uint32_t vaddr, bool is_write)
@@ -361,11 +404,13 @@ T ARM_JIT::guarded_read(uint32_t vaddr, F read)
 }
 
 template <typename F>
-void ARM_JIT::guarded_write(uint32_t vaddr, F write)
+void ARM_JIT::guarded_write(uint32_t vaddr, uint32_t size, F write)
 {
     try
     {
         write();
+        if (!code_chunks.empty())
+            check_code_write(vaddr, size);
         cache_page(vaddr);
     }
     catch (EmuException::ARMDataAbort& a)
@@ -396,6 +441,7 @@ std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
         const uint8_t* ptr = (const uint8_t*)(mem & ~TLB_FLAGS);
         uint32_t word;
         std::memcpy(&word, &ptr[vaddr & 0xFFF], sizeof(word));
+        mark_code(vaddr);
         return word;
     }
     catch (...)
@@ -436,24 +482,24 @@ std::uint64_t ARM_JIT::MemoryRead64(A32::VAddr vaddr)
 
 void ARM_JIT::MemoryWrite8(A32::VAddr vaddr, std::uint8_t value)
 {
-    guarded_write(vaddr, [&] { cpu.write8(vaddr, value); });
+    guarded_write(vaddr, 1, [&] { cpu.write8(vaddr, value); });
 }
 
 void ARM_JIT::MemoryWrite16(A32::VAddr vaddr, std::uint16_t value)
 {
-    guarded_write(vaddr, [&] { cpu.write16(vaddr, value); });
+    guarded_write(vaddr, 2, [&] { cpu.write16(vaddr, value); });
 }
 
 void ARM_JIT::MemoryWrite32(A32::VAddr vaddr, std::uint32_t value)
 {
     if (legacy_alignment)
         vaddr &= ~0x3U;
-    guarded_write(vaddr, [&] { cpu.write32(vaddr, value); });
+    guarded_write(vaddr, 4, [&] { cpu.write32(vaddr, value); });
 }
 
 void ARM_JIT::MemoryWrite64(A32::VAddr vaddr, std::uint64_t value)
 {
-    guarded_write(vaddr, [&] { cpu.write64(vaddr, value); });
+    guarded_write(vaddr, 8, [&] { cpu.write64(vaddr, value); });
 }
 
 //The global exclusive monitor already checked that this core holds the reservation; the
@@ -461,28 +507,28 @@ void ARM_JIT::MemoryWrite64(A32::VAddr vaddr, std::uint64_t value)
 bool ARM_JIT::MemoryWriteExclusive8(A32::VAddr vaddr, std::uint8_t value, std::uint8_t expected)
 {
     bool ok = false;
-    guarded_write(vaddr, [&] { if (cpu.read8(vaddr) == expected) { cpu.write8(vaddr, value); ok = true; } });
+    guarded_write(vaddr, 1, [&] { if (cpu.read8(vaddr) == expected) { cpu.write8(vaddr, value); ok = true; } });
     return ok;
 }
 
 bool ARM_JIT::MemoryWriteExclusive16(A32::VAddr vaddr, std::uint16_t value, std::uint16_t expected)
 {
     bool ok = false;
-    guarded_write(vaddr, [&] { if (cpu.read16(vaddr) == expected) { cpu.write16(vaddr, value); ok = true; } });
+    guarded_write(vaddr, 2, [&] { if (cpu.read16(vaddr) == expected) { cpu.write16(vaddr, value); ok = true; } });
     return ok;
 }
 
 bool ARM_JIT::MemoryWriteExclusive32(A32::VAddr vaddr, std::uint32_t value, std::uint32_t expected)
 {
     bool ok = false;
-    guarded_write(vaddr, [&] { if (cpu.read32(vaddr) == expected) { cpu.write32(vaddr, value); ok = true; } });
+    guarded_write(vaddr, 4, [&] { if (cpu.read32(vaddr) == expected) { cpu.write32(vaddr, value); ok = true; } });
     return ok;
 }
 
 bool ARM_JIT::MemoryWriteExclusive64(A32::VAddr vaddr, std::uint64_t value, std::uint64_t expected)
 {
     bool ok = false;
-    guarded_write(vaddr, [&] { if (cpu.read64(vaddr) == expected) { cpu.write64(vaddr, value); ok = true; } });
+    guarded_write(vaddr, 8, [&] { if (cpu.read64(vaddr) == expected) { cpu.write64(vaddr, value); ok = true; } });
     return ok;
 }
 

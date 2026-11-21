@@ -47,6 +47,10 @@ public:
      */
     void InvalidateCacheRange(std::uint32_t start_address, std::size_t length);
 
+    /// Blossom (x64 only): like InvalidateCacheRange, but takes effect at once, so it can be
+    /// called from a memory callback to catch self-modifying code before the guest branches to it.
+    void InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length);
+
     /**
      * Reset CPU state to state at startup. Does not clear code cache.
      * Cannot be called from a callback.

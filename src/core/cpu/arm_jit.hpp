@@ -93,6 +93,13 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         uint32_t last_context_id;
         uint32_t context;
 
+        //Self-modifying code: 64-byte chunks of each page that compiled code was read from. Pages
+        //with code are read-only in the shadow page table, so writes reach the callbacks, and a
+        //write to a chunk with code invalidates the blocks that cover it. The ARM11 kernel and the
+        //boot ROMs write code with the caches off and no cache maintenance, so I-cache operations
+        //alone are not enough.
+        std::unordered_map<uint32_t, uint64_t> code_chunks;
+
         void update_context();
         void sync_to_jit();
         void sync_from_jit();
@@ -101,13 +108,15 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         void clear_cache();
 
         void cache_page(uint32_t vaddr);
+        void mark_code(uint32_t vaddr);
+        void check_code_write(uint32_t vaddr, uint32_t size);
         void record_data_abort(uint32_t vaddr, bool is_write);
         void record_exception();
 
         template <typename T, typename F>
         T guarded_read(uint32_t vaddr, F read);
         template <typename F>
-        void guarded_write(uint32_t vaddr, F write);
+        void guarded_write(uint32_t vaddr, uint32_t size, F write);
 };
 
 #endif // ARM_JIT_HPP

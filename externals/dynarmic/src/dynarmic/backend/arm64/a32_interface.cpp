@@ -184,6 +184,11 @@ void Jit::InvalidateCacheRange(std::uint32_t start_address, std::size_t length) 
     impl->InvalidateCacheRange(start_address, length);
 }
 
+// Blossom: no immediate variant on this backend yet; deferred invalidation is the best it can do.
+void Jit::InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length) {
+    InvalidateCacheRange(start_address, length);
+}
+
 void Jit::Reset() {
     impl->Reset();
 }

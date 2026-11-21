@@ -124,6 +124,17 @@ struct Jit::Impl {
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
+    // Blossom: unlinks the blocks right away, so the code still running (the rest of the current
+    // block, its links, the fast dispatch table and the RSB) can no longer reach them. Safe from a
+    // memory callback: the old code stays in the code buffer until the next full clear.
+    void InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length) {
+        std::unique_lock lock{invalidation_mutex};
+        boost::icl::interval_set<u32> ranges;
+        ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        jit_state.ResetRSB();
+        emitter.InvalidateCacheRanges(ranges);
+    }
+
     void Reset() {
         ASSERT(!jit_interface->is_executing);
         jit_state = {};
@@ -295,6 +306,10 @@ void Jit::ClearCache() {
 
 void Jit::InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
     impl->InvalidateCacheRange(start_address, length);
+}
+
+void Jit::InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length) {
+    impl->InvalidateCacheRangeNow(start_address, length);
 }
 
 void Jit::Reset() {

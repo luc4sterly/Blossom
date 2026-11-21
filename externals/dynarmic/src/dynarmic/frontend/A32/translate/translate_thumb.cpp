@@ -181,6 +181,11 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
         }
     }
 
+    // Blossom: the block-length cap can end a block mid-stream with no terminal set
+    if (should_continue && !block.HasTerminal()) {
+        visitor.ir.SetTerm(IR::Term::LinkBlock{visitor.ir.current_location});
+    }
+
     ASSERT_MSG(block.HasTerminal(), "Terminal has not been set");
 
     block.SetEndLocation(visitor.ir.current_location);
