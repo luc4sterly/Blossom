@@ -42,6 +42,8 @@ enum Counter
     JIT_SLOW_READS,
     JIT_SLOW_WRITES,
     JIT_CHANGED_CHUNKS,
+    SLICES,
+    SHORT_SLICES,
     COUNTER_COUNT
 };
 

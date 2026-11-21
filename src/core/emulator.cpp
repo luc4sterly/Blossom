@@ -282,6 +282,9 @@ void Emulator::run()
         scheduler.calculate_cycles_to_run();
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
+        Profiler::counters[Profiler::SLICES]++;
+        if (cycles11 < 64)
+            Profiler::counters[Profiler::SHORT_SLICES]++;
 
         {
             Profiler::Scope prof_scope(Profiler::ARM11);
