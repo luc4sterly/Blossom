@@ -100,6 +100,7 @@ class ARM_CPU
         bool set_jit_enabled(bool enabled, Dynarmic::ExclusiveMonitor* monitor = nullptr);
         bool is_jit_enabled() const;
         static bool jit_available();
+        static void print_svc_stats(int frame);
         void set_test_console(bool enabled);
 
         //Debug counters for the profiler, reset when read: instructions the JIT sent to the

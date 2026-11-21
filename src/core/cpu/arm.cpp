@@ -15,13 +15,48 @@
 
 //The SVC/IPC trace reads guest memory on every SVC and floods stdout, which ends up costing more
 //than the JIT saves. Enable it with BLOSSOM_TRACE_SVC=1.
+//BLOSSOM_TRACE_SVC=2 prints no per-SVC lines; instead, every 60 frames, each process's SVCs and
+//service requests are counted on one line on stderr (see ARM_CPU::print_svc_stats). Small enough to share.
+static int trace_svc_level()
+{
+    static const int level = [] {
+        const char* env = getenv("BLOSSOM_TRACE_SVC");
+        return env ? atoi(env) : 0;
+    }();
+    return level;
+}
+
 static bool trace_svc_enabled()
 {
-    static const bool enabled = [] {
-        const char* env = getenv("BLOSSOM_TRACE_SVC");
-        return env && env[0] && env[0] != '0';
-    }();
-    return enabled;
+    return trace_svc_level() >= 1;
+}
+
+static bool trace_svc_lines()
+{
+    return trace_svc_level() == 1;
+}
+
+//(pid, name) -> (what, count)
+static std::map<std::pair<int, std::string>, std::map<std::string, uint64_t>> svc_stats;
+
+static void count_svc(int pid, const std::string& procname, const std::string& what)
+{
+    if (trace_svc_level() >= 2)
+        svc_stats[{pid, procname}][what]++;
+}
+
+void ARM_CPU::print_svc_stats(int frame)
+{
+    if (trace_svc_level() < 2 || frame % 60)
+        return;
+    for (auto& [proc, counts] : svc_stats)
+    {
+        fprintf(stderr, "[SVCSTAT] frame %d PID%d[%s]:", frame, proc.first, proc.second.c_str());
+        for (auto& [what, n] : counts)
+            fprintf(stderr, " %s x%llu", what.c_str(), (unsigned long long)n);
+        fprintf(stderr, "\n");
+    }
+    svc_stats.clear();
 }
 
 //BLOSSOM_TRACE_MMIO=1 logs every I/O register access by the ARM11 cores to stderr (physical
@@ -506,7 +541,8 @@ void ARM_CPU::swi()
     {
         //uint32_t process_ptr = read32(0xFFFF9004);
         //printf("SVC $%02X, PID%d\n", op, read32(process_ptr + 0xB4));
-        printf("[ARM%d] SVC $%02X!\n", id, op);
+        if (trace_svc_lines())
+            printf("[ARM%d] SVC $%02X!\n", id, op);
         //printf("SVC $%04X!\n", gpr[7]);
 
         //Trace of service sessions: remember which handle srv gave out for which name, so that
@@ -524,11 +560,18 @@ void ARM_CPU::swi()
                 //The thread runs again, so srv has replied into its command buffer
                 uint32_t result = read32(tls + 0x84);
                 uint32_t handle = read32(tls + 0x8C);
-                printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
-                       pid, procname.c_str(), it->second.c_str(), result, handle);
+                if (trace_svc_lines())
+                    printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
+                           pid, procname.c_str(), it->second.c_str(), result, handle);
                 if (result == 0)
                     service_handles[{pid, handle}] = it->second;
                 pending_service.erase(it);
+            }
+            if (op != 0x32)
+            {
+                char what[16];
+                snprintf(what, sizeof(what), "svc%02X", op);
+                count_svc(pid, procname, what);
             }
         }
 
@@ -542,7 +585,14 @@ void ARM_CPU::swi()
             get_hos_process_info(*this, pid, procname);
 
             auto named = service_handles.find({pid, gpr[0]});
-            printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
+            {
+                char what[64];
+                snprintf(what, sizeof(what), "%s:%08X",
+                         named != service_handles.end() ? named->second.c_str() : "?", header);
+                count_svc(pid, procname, what);
+            }
+            if (trace_svc_lines())
+                printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
                    gpr[0], named != service_handles.end() ? " = " : "",
                    named != service_handles.end() ? named->second.c_str() : "");
 
@@ -559,7 +609,8 @@ void ARM_CPU::swi()
                     printable &= name[i] >= 0x20 && name[i] < 0x7F;
                 if (printable)
                 {
-                    printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
+                    if (trace_svc_lines())
+                        printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
                            header == 0x00050100 ? "GetServiceHandle" : "RegisterService", name);
                     if (header == 0x00050100)
                         pending_service[{pid, tls}] = name;
@@ -621,7 +672,7 @@ void ARM_CPU::int_check()
 #endif
     if (!CPSR.irq_disable)
     {
-        if (trace_svc_enabled())
+        if (trace_svc_lines())
             printf("[ARM%d] Interrupt!\n", id);
         uint32_t value = CPSR.get();
         SPSR[PSR_IRQ].set(value);

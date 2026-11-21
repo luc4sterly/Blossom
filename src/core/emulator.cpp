@@ -326,6 +326,8 @@ void Emulator::run()
             scheduler.process_events();
         }
     }
+    gpu.print_debug_stats(frames);
+    ARM_CPU::print_svc_stats(frames);
     Profiler::end_frame(frames);
     if (Profiler::enabled)
     {
@@ -1171,7 +1173,14 @@ uint32_t Emulator::arm11_read32(int core, uint32_t addr)
         return hash.read32(addr);
     if (addr >= 0x10202000 && addr < 0x10203000)
     {
+        if (addr == 0x10202014)
+            return gpu.get_lcd_init();
+        if (addr == 0x10202204)
+            return gpu.get_screenfill(0);
+        if (addr == 0x10202A04)
+            return gpu.get_screenfill(1);
         printf("[LCD] Unrecognized read $%08X\n", addr);
+        gpu.note_lcd_access('r', addr, 0);
         return 0;
     }
     if (addr >= 0x10142800 && addr < 0x10144000)
@@ -1474,6 +1483,7 @@ void Emulator::arm11_write32(int core, uint32_t addr, uint32_t value)
             return;
         }
         printf("[LCD] Unrecognized write32 $%08X: $%08X\n", addr, value);
+        gpu.note_lcd_access('w', addr, value);
         return;
     }
     if (addr >= 0x1020F000 && addr < 0x10210000)
