@@ -1,6 +1,7 @@
 #ifndef SETTINGSWINDOW_H
 #define SETTINGSWINDOW_H
 
+#include <QComboBox>
 #include <QLabel>
 #include <QWidget>
 
@@ -12,6 +13,7 @@ class SettingsWindow : public QWidget
         QLabel* boot11_info;
         QLabel* nand_info;
         QLabel* sd_info;
+        QComboBox* cpu_box;
 
         void settings_update();
     public:

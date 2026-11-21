@@ -22,6 +22,8 @@ int main(int argc, char** argv)
         {"sd", "SD image dump. Optional, but required for sighaxed NANDs.", "sd"},
         {"autoload", "3DS cartridge. Starts emulation immediately.", "cart"},
         {"autoload-nocart", "Starts emulation immediately without a cartridge."},
+        {"cpu", "CPU backend for this run: jit (default), jit11 (JIT on ARM11 only) or interp "
+                "(interpreter, for debugging and comparing).", "backend"},
         {"dev-unsigned", "Development: accept the self-signed NCSD header of a synthetic NAND "
                          "built with tools/mknand. Real signatures are still checked."}
     });
@@ -48,6 +50,7 @@ int main(int argc, char** argv)
         Settings::sd_path = sd_path;
 
     Settings::dev_unsigned = parser.isSet("dev-unsigned");
+    Settings::cpu_backend_override = parser.value("cpu");
 
     //The order of this is important - we need to save settings before EmuWindow is constructed.
     //Otherwise, the settings window will have the old settings in the UI.

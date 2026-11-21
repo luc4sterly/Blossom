@@ -22,6 +22,9 @@ class VFP
 
         uint32_t fpexc;
         VFP_FPSCR fpscr;
+        //FPSCR bits the interpreter does not model (FZ, DN, exception flags/enables), kept so the
+        //JIT and the interpreter can hand the register to each other without losing them
+        uint32_t fpscr_other;
     public:
         VFP();
 
@@ -29,6 +32,8 @@ class VFP
         uint32_t get_fpscr();
         void set_fpexc(uint32_t value);
         void set_fpscr(uint32_t value);
+        //Same as set_fpscr, without logging or rejecting vector mode (used when syncing with the JIT)
+        void load_fpscr(uint32_t value);
 
         bool is_enabled();
 

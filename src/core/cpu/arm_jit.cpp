@@ -1,0 +1,556 @@
+#include <array>
+#include <cstdio>
+#include <cstring>
+
+#include <dynarmic/interface/A32/coprocessor.h>
+#include <dynarmic/interface/exclusive_monitor.h>
+
+#include "common/exceptions.hpp"
+#include "common/profiler.hpp"
+#include "core/cpu/arm.hpp"
+#include "core/cpu/arm_jit.hpp"
+#include "core/cpu/cp15.hpp"
+#include "core/cpu/vfp.hpp"
+
+using Dynarmic::HaltReason;
+namespace A32 = Dynarmic::A32;
+
+namespace
+{
+
+constexpr uint64_t TLB_MMIO = 1ULL << 63;
+constexpr uint64_t TLB_READ = 1ULL << 62;
+constexpr uint64_t TLB_WRITE = 1ULL << 61;
+constexpr uint64_t TLB_EXEC = 1ULL << 60;
+constexpr uint64_t TLB_FLAGS = 0xFULL << 60;
+
+//Halt reasons Blossom uses. MemoryAbort makes dynarmic stop right after the memory access that
+//requested it (check_halt_on_memory_access), with PC at the instruction that did the access.
+constexpr HaltReason HALT_STOP = HaltReason::UserDefined1;
+constexpr HaltReason HALT_ABORT = HaltReason::MemoryAbort;
+
+//Only MRC p15, 0, Rt, c13, c0, {2,3,4} (thread ID registers) reaches this; everything else on
+//CP15 is interpreted. Reads go straight to the CP15 registers through a pointer.
+class ThreadIdCoprocessor final : public A32::Coprocessor
+{
+    private:
+        uint32_t* regs;
+    public:
+        explicit ThreadIdCoprocessor(uint32_t* regs) : regs(regs) {}
+
+        std::optional<Callback> CompileInternalOperation(bool, unsigned, A32::CoprocReg, A32::CoprocReg,
+                                                         A32::CoprocReg, unsigned) override
+        {
+            return std::nullopt;
+        }
+
+        CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, A32::CoprocReg, A32::CoprocReg, unsigned) override
+        {
+            return {};
+        }
+
+        CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, A32::CoprocReg) override
+        {
+            return {};
+        }
+
+        CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, A32::CoprocReg CRn, A32::CoprocReg CRm,
+                                                  unsigned opc2) override
+        {
+            if (!two && opc1 == 0 && CRn == A32::CoprocReg::C13 && CRm == A32::CoprocReg::C0 && opc2 >= 2 && opc2 <= 4)
+                return &regs[opc2 - 2];
+            return {};
+        }
+
+        CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, A32::CoprocReg) override
+        {
+            return {};
+        }
+
+        std::optional<Callback> CompileLoadWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override
+        {
+            return std::nullopt;
+        }
+
+        std::optional<Callback> CompileStoreWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override
+        {
+            return std::nullopt;
+        }
+};
+
+}
+
+ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
+{
+    page_table = std::make_unique<JitPageTable>();
+    cpu.cp15->set_jit_page_table(page_table.get());
+
+    const bool is_arm9 = cpu.id == 9;
+    legacy_alignment = is_arm9;
+
+    A32::UserConfig conf;
+    conf.callbacks = this;
+    conf.arch_version = is_arm9 ? A32::ArchVersion::v5TE : A32::ArchVersion::v6K;
+    if (!is_arm9 && monitor)
+    {
+        conf.global_monitor = monitor;
+        conf.processor_id = cpu.id - 11;
+    }
+
+    conf.page_table = reinterpret_cast<std::array<std::uint8_t*, A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>*>(
+        page_table->entries);
+    conf.page_table_pointer_mask_bits = 2;
+    conf.page_table_read_only_bit0 = true;
+    //Accesses that straddle two pages go through the callbacks (the pages may not be contiguous)
+    conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+    //On the ARM9 every misaligned word access needs the ARMv5 behaviour from the callbacks
+    conf.only_detect_misalignment_via_page_table_on_page_boundary = !legacy_alignment;
+
+    conf.interpret_system_instructions = true;
+    conf.hook_hint_instructions = false;
+    conf.check_halt_on_memory_access = true;
+    conf.always_little_endian = true;
+    conf.code_cache_size = 96 * 1024 * 1024;
+    //Keeps blocks from overshooting the cycle budget by much (timers, other cores)
+    conf.max_block_instructions = 64;
+
+    if (!is_arm9)
+    {
+        cp15_thread_id = std::make_shared<ThreadIdCoprocessor>(cpu.cp15->get_thread_regs());
+        conf.coprocessors[15] = cp15_thread_id;
+    }
+
+    jit = std::make_unique<A32::Jit>(conf);
+    reset();
+}
+
+ARM_JIT::~ARM_JIT()
+{
+    cpu.cp15->set_jit_page_table(nullptr);
+}
+
+void ARM_JIT::reset()
+{
+    jit->Reset();
+    jit->ClearCache();
+    jit->ClearExclusiveState();
+    page_table->invalidate_all();
+    context_ids.clear();
+    last_context_key = 0;
+    last_context_id = ~0U;
+    context = 0;
+
+    pending_exception = nullptr;
+    data_abort_pending = false;
+    prefetch_abort_pending = false;
+    svc_pending = false;
+    cycle_target = 0;
+
+    sync_vfp_to_jit();
+}
+
+void ARM_JIT::leave()
+{
+    sync_vfp_from_jit();
+}
+
+void ARM_JIT::request_exit()
+{
+    jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::clear_cache()
+{
+    jit->ClearCache();
+    Profiler::counters[Profiler::JIT_CACHE_CLEARS]++;
+}
+
+void ARM_JIT::update_context()
+{
+    uint32_t key = cpu.cp15->get_address_space_key();
+    if (key != last_context_key || last_context_id == ~0U)
+    {
+        auto it = context_ids.find(key);
+        if (it == context_ids.end())
+        {
+            //Ids are 8 bits wide. Running out means many address spaces were created over time;
+            //start over with a clean cache.
+            if (context_ids.size() >= 256)
+            {
+                clear_cache();
+                context_ids.clear();
+            }
+            uint32_t new_id = (uint32_t)context_ids.size();
+            it = context_ids.emplace(key, new_id).first;
+            Profiler::counters[Profiler::JIT_CONTEXTS]++;
+        }
+        last_context_key = key;
+        last_context_id = it->second;
+    }
+
+    uint32_t c = ((last_context_id & 0xF) << 4) | ((last_context_id >> 4) << 27);
+    if (!cpu.vfp || !cpu.vfp->is_enabled())
+        c |= A32::Jit::CONTEXT_VFP_DISABLED;
+    context = c;
+}
+
+void ARM_JIT::sync_to_jit()
+{
+    auto& regs = jit->Regs();
+    for (int i = 0; i < 15; i++)
+        regs[i] = cpu.gpr[i];
+    //The interpreter keeps PC one instruction ahead (next instruction + 4 in ARM, + 2 in Thumb)
+    regs[15] = cpu.gpr[15] - (cpu.CPSR.thumb ? 2 : 4);
+    jit->SetCpsr(cpu.CPSR.get());
+    jit->SetContext(context);
+}
+
+void ARM_JIT::sync_from_jit()
+{
+    const auto& regs = jit->Regs();
+    for (int i = 0; i < 15; i++)
+        cpu.gpr[i] = regs[i];
+    cpu.CPSR.set(jit->Cpsr());
+    cpu.gpr[15] = regs[15] + (cpu.CPSR.thumb ? 2 : 4);
+}
+
+void ARM_JIT::sync_vfp_to_jit()
+{
+    if (!cpu.vfp)
+        return;
+    auto& ext = jit->ExtRegs();
+    for (int i = 0; i < 32; i++)
+        ext[i] = cpu.vfp->get_reg32(i);
+    jit->SetFpscr(cpu.vfp->get_fpscr());
+}
+
+void ARM_JIT::sync_vfp_from_jit()
+{
+    if (!cpu.vfp)
+        return;
+    const auto& ext = jit->ExtRegs();
+    for (int i = 0; i < 32; i++)
+        cpu.vfp->set_reg32(i, ext[i]);
+    cpu.vfp->load_fpscr(jit->Fpscr());
+}
+
+void ARM_JIT::run(int cycles)
+{
+    cpu.cycles_ran = 0;
+    cycle_target = cycles;
+
+    update_context();
+    sync_to_jit();
+
+    while (true)
+    {
+        cpu.in_jit = true;
+        jit->Run();
+        cpu.in_jit = false;
+        jit->ClearHalt(HALT_STOP | HALT_ABORT);
+
+        sync_from_jit();
+
+        if (pending_exception)
+        {
+            std::exception_ptr e = pending_exception;
+            pending_exception = nullptr;
+            data_abort_pending = prefetch_abort_pending = svc_pending = false;
+            std::rethrow_exception(e);
+        }
+
+        if (data_abort_pending)
+        {
+            //PC is at the faulting instruction; the interpreter would be two instructions ahead
+            data_abort_pending = false;
+            cpu.gpr[15] += cpu.CPSR.thumb ? 2 : 4;
+            cpu.data_abort(data_abort_addr, data_abort_write);
+        }
+        else if (prefetch_abort_pending)
+        {
+            prefetch_abort_pending = false;
+            //The block that raised the fault must be retranslated once the page is mapped
+            jit->InvalidateCacheRange(prefetch_abort_addr, 4);
+            cpu.prefetch_abort(prefetch_abort_addr);
+        }
+
+        if (svc_pending)
+        {
+            svc_pending = false;
+            cpu.swi();
+        }
+
+        if (cpu.int_pending)
+            cpu.int_check();
+
+        if (cpu.halted || cpu.cycles_ran >= cycle_target)
+            break;
+
+        update_context();
+        sync_to_jit();
+    }
+}
+
+void ARM_JIT::on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed)
+{
+    //The MMU was switched on or off: cached pages came from the other mapping
+    if (mapping_changed)
+        page_table->invalidate_all();
+
+    switch (op)
+    {
+        case 0x750: //Invalidate entire instruction cache
+        case 0x752: //Invalidate instruction cache line (set/way)
+        case 0x770: //Invalidate both caches
+            clear_cache();
+            break;
+        case 0x751: //Invalidate instruction cache line (MVA)
+            jit->InvalidateCacheRange(value & ~0x1FU, 32);
+            Profiler::counters[Profiler::JIT_RANGE_INVALIDATIONS]++;
+            break;
+        default:
+            break;
+    }
+}
+
+void ARM_JIT::cache_page(uint32_t vaddr)
+{
+    uint32_t page = vaddr >> 12;
+    uint64_t mem = (uint64_t)cpu.tlb_map[page];
+    if ((mem & TLB_READ) && !(mem & TLB_MMIO))
+        page_table->set(page, (uint8_t*)(mem & ~TLB_FLAGS), !(mem & TLB_WRITE));
+}
+
+void ARM_JIT::record_data_abort(uint32_t vaddr, bool is_write)
+{
+    if (!data_abort_pending)
+    {
+        data_abort_pending = true;
+        data_abort_addr = vaddr;
+        data_abort_write = is_write;
+    }
+    jit->HaltExecution(HALT_ABORT);
+}
+
+void ARM_JIT::record_exception()
+{
+    //C++ exceptions cannot unwind through JIT code: keep it and rethrow it once Run returns
+    if (!pending_exception)
+        pending_exception = std::current_exception();
+    jit->HaltExecution(HALT_ABORT);
+}
+
+template <typename T, typename F>
+T ARM_JIT::guarded_read(uint32_t vaddr, F read)
+{
+    try
+    {
+        T value = read();
+        cache_page(vaddr);
+        return value;
+    }
+    catch (EmuException::ARMDataAbort& a)
+    {
+        record_data_abort(a.vaddr, false);
+    }
+    catch (...)
+    {
+        record_exception();
+    }
+    return 0;
+}
+
+template <typename F>
+void ARM_JIT::guarded_write(uint32_t vaddr, F write)
+{
+    try
+    {
+        write();
+        cache_page(vaddr);
+    }
+    catch (EmuException::ARMDataAbort& a)
+    {
+        record_data_abort(a.vaddr, true);
+    }
+    catch (...)
+    {
+        record_exception();
+    }
+}
+
+std::optional<std::uint32_t> ARM_JIT::MemoryReadCode(A32::VAddr vaddr)
+{
+    try
+    {
+        uint32_t page = vaddr >> 12;
+        uint64_t mem = (uint64_t)cpu.tlb_map[page];
+        if (!(mem & TLB_EXEC))
+        {
+            cpu.cp15->reload_tlb(vaddr);
+            mem = (uint64_t)cpu.tlb_map[page];
+            if (!(mem & TLB_EXEC))
+                return std::nullopt;
+        }
+        if (mem & TLB_MMIO)
+            EmuException::die("[ARM%d] PC points to MMIO $%08X", cpu.id, vaddr);
+        const uint8_t* ptr = (const uint8_t*)(mem & ~TLB_FLAGS);
+        uint32_t word;
+        std::memcpy(&word, &ptr[vaddr & 0xFFF], sizeof(word));
+        return word;
+    }
+    catch (...)
+    {
+        record_exception();
+        return std::nullopt;
+    }
+}
+
+std::uint8_t ARM_JIT::MemoryRead8(A32::VAddr vaddr)
+{
+    return guarded_read<uint8_t>(vaddr, [&] { return cpu.read8(vaddr); });
+}
+
+std::uint16_t ARM_JIT::MemoryRead16(A32::VAddr vaddr)
+{
+    return guarded_read<uint16_t>(vaddr, [&] { return cpu.read16(vaddr); });
+}
+
+std::uint32_t ARM_JIT::MemoryRead32(A32::VAddr vaddr)
+{
+    if (legacy_alignment && (vaddr & 0x3))
+    {
+        return guarded_read<uint32_t>(vaddr, [&]
+        {
+            uint32_t word = cpu.read32(vaddr & ~0x3U);
+            int shift = (vaddr & 0x3) * 8;
+            return (word >> shift) | (word << (32 - shift));
+        });
+    }
+    return guarded_read<uint32_t>(vaddr, [&] { return cpu.read32(vaddr); });
+}
+
+std::uint64_t ARM_JIT::MemoryRead64(A32::VAddr vaddr)
+{
+    return guarded_read<uint64_t>(vaddr, [&] { return cpu.read64(vaddr); });
+}
+
+void ARM_JIT::MemoryWrite8(A32::VAddr vaddr, std::uint8_t value)
+{
+    guarded_write(vaddr, [&] { cpu.write8(vaddr, value); });
+}
+
+void ARM_JIT::MemoryWrite16(A32::VAddr vaddr, std::uint16_t value)
+{
+    guarded_write(vaddr, [&] { cpu.write16(vaddr, value); });
+}
+
+void ARM_JIT::MemoryWrite32(A32::VAddr vaddr, std::uint32_t value)
+{
+    if (legacy_alignment)
+        vaddr &= ~0x3U;
+    guarded_write(vaddr, [&] { cpu.write32(vaddr, value); });
+}
+
+void ARM_JIT::MemoryWrite64(A32::VAddr vaddr, std::uint64_t value)
+{
+    guarded_write(vaddr, [&] { cpu.write64(vaddr, value); });
+}
+
+//The global exclusive monitor already checked that this core holds the reservation; the
+//write only succeeds if memory still holds the value LDREX read (cores run one at a time).
+bool ARM_JIT::MemoryWriteExclusive8(A32::VAddr vaddr, std::uint8_t value, std::uint8_t expected)
+{
+    bool ok = false;
+    guarded_write(vaddr, [&] { if (cpu.read8(vaddr) == expected) { cpu.write8(vaddr, value); ok = true; } });
+    return ok;
+}
+
+bool ARM_JIT::MemoryWriteExclusive16(A32::VAddr vaddr, std::uint16_t value, std::uint16_t expected)
+{
+    bool ok = false;
+    guarded_write(vaddr, [&] { if (cpu.read16(vaddr) == expected) { cpu.write16(vaddr, value); ok = true; } });
+    return ok;
+}
+
+bool ARM_JIT::MemoryWriteExclusive32(A32::VAddr vaddr, std::uint32_t value, std::uint32_t expected)
+{
+    bool ok = false;
+    guarded_write(vaddr, [&] { if (cpu.read32(vaddr) == expected) { cpu.write32(vaddr, value); ok = true; } });
+    return ok;
+}
+
+bool ARM_JIT::MemoryWriteExclusive64(A32::VAddr vaddr, std::uint64_t value, std::uint64_t expected)
+{
+    bool ok = false;
+    guarded_write(vaddr, [&] { if (cpu.read64(vaddr) == expected) { cpu.write64(vaddr, value); ok = true; } });
+    return ok;
+}
+
+void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
+{
+    (void)pc;
+    (void)num_instructions; //Always 1 with interpret_system_instructions
+    Profiler::counters[Profiler::JIT_FALLBACKS]++;
+
+    try
+    {
+        sync_from_jit();
+        sync_vfp_from_jit();
+
+        cpu.in_jit = false;
+        cpu.interpret_one();
+        cpu.in_jit = true;
+
+        sync_vfp_to_jit();
+        update_context();
+        sync_to_jit();
+    }
+    catch (...)
+    {
+        cpu.in_jit = true;
+        record_exception();
+        return;
+    }
+
+    //WFI/WFE/a CP15 halt, or an instruction that unmasked a pending interrupt (CPS, MSR, ...)
+    if (cpu.halted || (cpu.int_pending && !cpu.CPSR.irq_disable))
+        jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::CallSVC(std::uint32_t swi)
+{
+    (void)swi; //ARM_CPU::swi reads the comment field itself
+    svc_pending = true;
+    jit->HaltExecution(HALT_STOP);
+}
+
+void ARM_JIT::ExceptionRaised(A32::VAddr pc, A32::Exception exception)
+{
+    if (exception == A32::Exception::NoExecuteFault)
+    {
+        prefetch_abort_pending = true;
+        prefetch_abort_addr = pc;
+        jit->HaltExecution(HALT_STOP);
+        return;
+    }
+
+    //With interpret_system_instructions every other case goes to InterpreterFallback
+    try
+    {
+        EmuException::die("[ARM%d] Unexpected JIT exception %d at $%08X", cpu.id, (int)exception, pc);
+    }
+    catch (...)
+    {
+        record_exception();
+    }
+}
+
+void ARM_JIT::AddTicks(std::uint64_t ticks)
+{
+    cpu.cycles_ran += (int)ticks;
+}
+
+std::uint64_t ARM_JIT::GetTicksRemaining()
+{
+    return cpu.cycles_ran < cycle_target ? (uint64_t)(cycle_target - cpu.cycles_ran) : 0;
+}

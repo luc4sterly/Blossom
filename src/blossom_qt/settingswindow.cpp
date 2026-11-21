@@ -73,8 +73,29 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QWidget(parent)
     QGroupBox* system_files_box = new QGroupBox(tr("System Files"));
     system_files_box->setLayout(grid);
 
+    cpu_box = new QComboBox;
+    cpu_box->addItem(tr("JIT (dynarmic) - fast"), "jit");
+    cpu_box->addItem(tr("JIT on ARM11, interpreter on ARM9"), "jit11");
+    cpu_box->addItem(tr("Interpreter - slow, for debugging"), "interp");
+    int cpu_index = cpu_box->findData(Settings::cpu_backend);
+    cpu_box->setCurrentIndex(cpu_index >= 0 ? cpu_index : 0);
+    connect(cpu_box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+    {
+        Settings::cpu_backend = cpu_box->currentData().toString();
+        Settings::save();
+    });
+
+    QGridLayout* cpu_grid = new QGridLayout;
+    cpu_grid->addWidget(new QLabel(tr("CPU backend")), 0, 0);
+    cpu_grid->addWidget(cpu_box, 0, 1);
+    cpu_grid->addWidget(new QLabel(tr("Takes effect the next time the emulator boots.")), 1, 0, 1, 2);
+
+    QGroupBox* cpu_settings_box = new QGroupBox(tr("CPU"));
+    cpu_settings_box->setLayout(cpu_grid);
+
     QVBoxLayout* layout = new QVBoxLayout;
     layout->addWidget(system_files_box);
+    layout->addWidget(cpu_settings_box);
 
     setLayout(layout);
 

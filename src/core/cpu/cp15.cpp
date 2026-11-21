@@ -13,6 +13,8 @@ void CP15::reset(bool has_tcm)
 {
     mmu_enabled = false;
     aux_control = 0xF;
+    thread_regs[0] = thread_regs[1] = thread_regs[2] = 0;
+    instr_fault_reg = 0;
     data_fault_addr = 0;
     data_fault_reg = 0;
     if (has_tcm)
@@ -58,6 +60,23 @@ uint8_t** CP15::get_tlb_mapping()
 bool CP15::has_high_exceptions()
 {
     return high_exception_vector;
+}
+
+void CP15::set_jit_page_table(JitPageTable* table)
+{
+    mmu->set_jit_page_table(table);
+}
+
+uint32_t* CP15::get_thread_regs()
+{
+    return thread_regs;
+}
+
+uint32_t CP15::get_address_space_key()
+{
+    if (!mmu_enabled || id == 9)
+        return mmu_enabled ? 0 : 0xFFFFFFFF;
+    return mmu->get_l1_table_base(0);
 }
 
 void CP15::set_data_abort_regs(uint32_t vaddr, bool is_write)

@@ -12,6 +12,14 @@ option(ENABLE_QT "Build the Qt 6 frontend" ON)
 option(ENABLE_TESTS "Build the CPU test runner and register CTest tests" ON)
 option(ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 
+# The dynarmic JIT only has an x86-64 backend wired up in Blossom for now.
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(BLOSSOM_JIT_DEFAULT ON)
+else()
+    set(BLOSSOM_JIT_DEFAULT OFF)
+endif()
+option(ENABLE_JIT "Build the dynarmic JIT CPU backend (x86-64)" ${BLOSSOM_JIT_DEFAULT})
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -24,6 +32,16 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 find_package(GMP REQUIRED)
+
+if (ENABLE_JIT)
+    # dynarmic (vendored from azahar-emu/dynarmic, see externals/dynarmic/BLOSSOM.md)
+    set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)
+    set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+    find_package(Boost 1.57 REQUIRED)
+    add_subdirectory(externals/dynarmic EXCLUDE_FROM_ALL)
+endif()
 
 if (ENABLE_TESTS)
     enable_testing()

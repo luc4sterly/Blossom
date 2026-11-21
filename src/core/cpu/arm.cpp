@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <sstream>
@@ -7,7 +8,21 @@
 #include "core/cpu/arm_interpret.hpp"
 #include "core/cpu/vfp.hpp"
 #include "common/common.hpp"
+#ifdef BLOSSOM_HAS_JIT
+#include "core/cpu/arm_jit.hpp"
+#endif
 #include "core/emulator.hpp"
+
+//The SVC/IPC trace reads guest memory on every SVC and floods stdout, which ends up costing more
+//than the JIT saves. Enable it with BLOSSOM_TRACE_SVC=1.
+static bool trace_svc_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_TRACE_SVC");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
 
 uint64_t ARM_CPU::global_exclusive_start[4];
 uint64_t ARM_CPU::global_exclusive_end[4];
@@ -89,7 +104,48 @@ void PSR_Flags::set(uint32_t value)
 
 ARM_CPU::ARM_CPU(Emulator* e, int id, CP15* cp15, VFP* vfp) : e(e), id(id), cp15(cp15), vfp(vfp)
 {
+    in_jit = false;
+    test_console = false;
+}
 
+ARM_CPU::~ARM_CPU() = default;
+
+bool ARM_CPU::jit_available()
+{
+#ifdef BLOSSOM_HAS_JIT
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool ARM_CPU::set_jit_enabled(bool enabled, Dynarmic::ExclusiveMonitor* monitor)
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (!enabled)
+    {
+        if (jit)
+            jit->leave();
+        jit.reset();
+        return true;
+    }
+    if (!jit)
+        jit = std::make_unique<ARM_JIT>(*this, monitor);
+    return true;
+#else
+    (void)monitor;
+    return !enabled;
+#endif
+}
+
+bool ARM_CPU::is_jit_enabled() const
+{
+    return jit != nullptr;
+}
+
+void ARM_CPU::set_test_console(bool enabled)
+{
+    test_console = enabled;
 }
 
 std::string ARM_CPU::get_reg_name(int id)
@@ -143,12 +199,63 @@ void ARM_CPU::reset()
 
     local_exclusive_start = 0;
     local_exclusive_end = 0;
+
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        jit->reset();
+#endif
+}
+
+void ARM_CPU::interpret_one()
+{
+    try
+    {
+        if (CPSR.thumb)
+        {
+            fetch_new_instr_ptr(gpr[15] - 2);
+            if (prefetch_abort_occurred)
+                throw EmuException::ARMPrefetchAbort(gpr[15] - 2);
+            uint16_t instr = *(uint16_t*)&instr_ptr[(gpr[15] - 2) & 0xFFF];
+            gpr[15] += 2;
+            if (can_disassemble)
+                printf("[$%08X] $%04X  %s\n", gpr[15] - 4, instr, ARM_Disasm::disasm_thumb(*this, instr).c_str());
+            ARM_Interpreter::interpret_thumb(*this, instr);
+        }
+        else
+        {
+            fetch_new_instr_ptr(gpr[15] - 4);
+            if (prefetch_abort_occurred)
+                throw EmuException::ARMPrefetchAbort(gpr[15] - 4);
+            uint32_t instr = *(uint32_t*)&instr_ptr[(gpr[15] - 4) & 0xFFF];
+            gpr[15] += 4;
+            if (can_disassemble)
+                printf("[$%08X] $%08X  %s\n", gpr[15] - 8, instr, ARM_Disasm::disasm_arm(*this, instr).c_str());
+            ARM_Interpreter::interpret_arm(*this, instr);
+        }
+        cycles_ran++;
+    }
+    catch (EmuException::ARMDataAbort& a)
+    {
+        data_abort(a.vaddr, a.is_write);
+    }
+    catch (EmuException::ARMPrefetchAbort& p)
+    {
+        prefetch_abort(p.vaddr);
+    }
 }
 
 void ARM_CPU::run(int cycles)
 {
     if (halted)
         return;
+
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+    {
+        jit->run(cycles);
+        return;
+    }
+#endif
 
     try
     {
@@ -294,9 +401,9 @@ void ARM_CPU::swi()
     if (!CPSR.thumb)
         op = read32(gpr[15] - 8) & 0xFF;
     else
-        op = read32(gpr[15] - 4) & 0xFF;
+        op = read16(gpr[15] - 4) & 0xFF;
 
-    if (id == 9)
+    if (id == 9 || test_console)
     {
         //printf("SWI $%02X!\n", op);
         if (op == 0xFF)
@@ -309,7 +416,7 @@ void ARM_CPU::swi()
             return;
         }
     }
-    else
+    else if (trace_svc_enabled())
     {
         //uint32_t process_ptr = read32(0xFFFF9004);
         //printf("SVC $%02X, PID%d\n", op, read32(process_ptr + 0xB4));
@@ -418,9 +525,18 @@ void ARM_CPU::und()
 void ARM_CPU::int_check()
 {
     //printf("[ARM%d] Interrupt check\n", id);
+#ifdef BLOSSOM_HAS_JIT
+    if (in_jit)
+    {
+        //Registers live in the JIT right now; take the interrupt once Jit::Run returns
+        jit->request_exit();
+        return;
+    }
+#endif
     if (!CPSR.irq_disable)
     {
-        printf("[ARM%d] Interrupt!\n", id);
+        if (trace_svc_enabled())
+            printf("[ARM%d] Interrupt!\n", id);
         uint32_t value = CPSR.get();
         SPSR[PSR_IRQ].set(value);
 
@@ -1371,10 +1487,20 @@ void ARM_CPU::mcr(int coprocessor_id, int operation_mode,
     switch (coprocessor_id)
     {
         case 15:
+        {
             cp15->mcr(operation_mode, CP_reg, coprocessor_info, coprocessor_operand, value);
 
+            uint8_t** old_map = tlb_map;
             tlb_map = cp15->get_tlb_mapping();
+#ifdef BLOSSOM_HAS_JIT
+            if (jit)
+                jit->on_cp15_write((CP_reg << 8) | (coprocessor_operand << 4) | coprocessor_info, value,
+                                   old_map != tlb_map);
+#else
+            (void)old_map;
+#endif
             break;
+        }
     }
 }
 

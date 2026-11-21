@@ -1,8 +1,14 @@
 #ifndef ARM_HPP
 #define ARM_HPP
 #include <cstdint>
+#include <memory>
 #include <string>
 #include "core/cpu/cp15.hpp"
+
+namespace Dynarmic
+{
+    class ExclusiveMonitor;
+}
 
 #define REG_SP 13
 #define REG_LR 14
@@ -44,9 +50,11 @@ struct PSR_Flags
 
 class Emulator;
 class VFP;
+class ARM_JIT;
 
 class ARM_CPU
 {
+    friend class ARM_JIT;
     private:
         Emulator* e;
         int id;
@@ -72,10 +80,30 @@ class ARM_CPU
         uint8_t** tlb_map;
         uint8_t* instr_ptr;
 
+        //JIT backend; null when this core runs on the interpreter
+        std::unique_ptr<ARM_JIT> jit;
+
+        //Set while the JIT is inside Jit::Run, when gpr/CPSR are stale and must not be touched
+        bool in_jit;
+
+        //Prints SWI $FF characters on any core (ELF test runner)
+        bool test_console;
+
         void fetch_new_instr_ptr(uint32_t addr);
     public:
         static uint64_t global_exclusive_start[4], global_exclusive_end[4];
         ARM_CPU(Emulator* e, int id, CP15* cp15, VFP* vfp);
+        ~ARM_CPU();
+
+        //Switches this core between the dynarmic JIT and the interpreter. Call while the core
+        //is not running (before reset or between frames). Returns false if the JIT is not built in.
+        bool set_jit_enabled(bool enabled, Dynarmic::ExclusiveMonitor* monitor = nullptr);
+        bool is_jit_enabled() const;
+        static bool jit_available();
+        void set_test_console(bool enabled);
+
+        //Runs exactly one instruction on the interpreter (used by the JIT for system instructions)
+        void interpret_one();
 
         static std::string get_reg_name(int id);
 

@@ -7,6 +7,7 @@ MMU::MMU()
     user_mapping = nullptr;
     privileged_mapping = nullptr;
     direct_mapping = nullptr;
+    jit_page_table = nullptr;
 }
 
 MMU::~MMU()
@@ -31,6 +32,9 @@ void MMU::reset()
 
     memset(user_mapping, 0, 1024 * 1024 * sizeof(uint8_t*));
     memset(privileged_mapping, 0, 1024 * 1024 * sizeof(uint8_t*));
+    tlb_regions.reset();
+    if (jit_page_table)
+        jit_page_table->invalidate_all();
 
     for (uint64_t i = 0; i < 1024 * 1024; i++)
     {
@@ -49,6 +53,11 @@ void MMU::reset()
 
 void MMU::add_physical_mapping(uint8_t *mem, uint32_t base, uint32_t size)
 {
+    //TLB entries and JIT pages may point at the old physical memory; drop them so they are rebuilt.
+    invalidate_tlb();
+    if (jit_page_table)
+        jit_page_table->invalidate_all();
+
     uint64_t addr = (uint64_t)mem;
     addr |= 7ULL << 60ULL;
 
@@ -64,6 +73,11 @@ void MMU::add_physical_mapping(uint8_t *mem, uint32_t base, uint32_t size)
 
 void MMU::remove_physical_mapping(uint32_t base, uint32_t size)
 {
+    //TLB entries and JIT pages may point at the old physical memory; drop them so they are rebuilt.
+    invalidate_tlb();
+    if (jit_page_table)
+        jit_page_table->invalidate_all();
+
     base /= 4096;
     size /= 4096;
 
@@ -90,11 +104,26 @@ uint8_t** MMU::get_user_mapping()
     return user_mapping;
 }
 
+void MMU::set_jit_page_table(JitPageTable* table)
+{
+    jit_page_table = table;
+}
+
+void MMU::flush_tlb_range(uint32_t start_page, uint32_t page_count)
+{
+    tlb_regions.flush(start_page, page_count, [this](uint32_t first)
+    {
+        memset(privileged_mapping + first, 0, PageRegions::PAGES_PER_REGION * sizeof(uint8_t*));
+        memset(user_mapping + first, 0, PageRegions::PAGES_PER_REGION * sizeof(uint8_t*));
+        if (jit_page_table)
+            jit_page_table->invalidate_range(first, PageRegions::PAGES_PER_REGION);
+    });
+}
+
 void MMU::invalidate_tlb()
 {
     whole_tlb_invalidated = true;
-    memset(privileged_mapping, 0, 1024 * 1024 * sizeof(uint8_t*));
-    memset(user_mapping, 0, 1024 * 1024 * sizeof(uint8_t*));
+    flush_tlb_range(0, 1024 * 1024);
 }
 
 void MMU::invalidate_tlb_by_table(int index)
@@ -110,16 +139,14 @@ void MMU::invalidate_tlb_by_table(int index)
         size = (1024 * 1024) - cutoff;
     }
 
-    memset(privileged_mapping + start, 0, size * sizeof(uint8_t*));
-    memset(user_mapping + start, 0, size * sizeof(uint8_t*));
+    flush_tlb_range(start, size);
 }
 
 void MMU::invalidate_tlb_by_addr(uint32_t value)
 {
     uint32_t addr = value / 4096;
 
-    privileged_mapping[addr] = nullptr;
-    user_mapping[addr] = nullptr;
+    set_tlb_entry(addr, nullptr, nullptr);
 }
 
 void MMU::reload_tlb_section(uint32_t addr)
@@ -147,8 +174,7 @@ void MMU::reload_tlb_section(uint32_t addr)
     {
         for (int j = 0; j < 256; j++)
         {
-            privileged_mapping[page + j] = nullptr;
-            user_mapping[page + j] = nullptr;
+            set_tlb_entry(page + j, nullptr, nullptr);
         }
     }
     else if (type == 2)
@@ -194,8 +220,7 @@ void MMU::reload_tlb_section(uint32_t addr)
             if (!type)
             {
                 //printf("Unmapped\n");
-                privileged_mapping[page] = nullptr;
-                user_mapping[page] = nullptr;
+                set_tlb_entry(page, nullptr, nullptr);
                 page++;
                 addr += 1024 * 4;
             }
@@ -261,8 +286,7 @@ void MMU::reload_tlb_by_table(int index)
 
             for (int j = 0; j < 256; j++)
             {
-                privileged_mapping[(pc / 4096) + j] = nullptr;
-                user_mapping[(pc / 4096) + j] = nullptr;
+                set_tlb_entry((pc / 4096) + j, nullptr, nullptr);
             }
             pc += 1024 * 1024;
         }
@@ -312,8 +336,7 @@ void MMU::reload_tlb_by_table(int index)
                 if (!type)
                 {
                     //printf("Unmapped\n");
-                    privileged_mapping[pc / 4096] = nullptr;
-                    user_mapping[pc / 4096] = nullptr;
+                    set_tlb_entry(pc / 4096, nullptr, nullptr);
                     pc += 1024 * 4;
                 }
                 else if (type == 1)
@@ -372,7 +395,7 @@ void MMU::remap_mmu_region(uint32_t base, uint32_t size, uint64_t paddr,
         //Strip permission bits off
         mapping &= ~(0x7ULL << 60ULL);
 
-        privileged_mapping[base + i] = (uint8_t*)(mapping | priv_perm);
+        set_tlb_entry(base + i, (uint8_t*)(mapping | priv_perm), user_mapping[base + i]);
     }
 }
 
@@ -494,8 +517,7 @@ void MMU::unmap_pu_region(int index)
 
     while (start < end)
     {
-        privileged_mapping[start] = nullptr;
-        user_mapping[start] = nullptr;
+        set_tlb_entry(start, nullptr, nullptr);
         start++;
     }
 }
@@ -536,8 +558,7 @@ void MMU::remap_pu_region(int index)
         user_addr |= (uint64_t)(pu_regions[index].instr_user_perm) << 60ULL;
         user_addr |= (uint64_t)(pu_regions[index].data_user_perm) << 60ULL;
 
-        privileged_mapping[start] = (uint8_t*)privileged_addr;
-        user_mapping[start] = (uint8_t*)user_addr;
+        set_tlb_entry(start, (uint8_t*)privileged_addr, (uint8_t*)user_addr);
 
         start++;
     }

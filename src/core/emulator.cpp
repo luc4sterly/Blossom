@@ -1,4 +1,9 @@
 #include "common/profiler.hpp"
+#ifdef BLOSSOM_HAS_JIT
+#include <dynarmic/interface/exclusive_monitor.h>
+#endif
+#include <cstdlib>
+#include <string>
 #include <cstdio>
 #include <cstring>
 #include "common/common.hpp"
@@ -47,6 +52,11 @@ Emulator::Emulator() :
 
 Emulator::~Emulator()
 {
+    //The JITs reference the exclusive monitor; drop them first
+    arm9.set_jit_enabled(false);
+    for (int i = 0; i < 4; i++)
+        arm11[i].set_jit_enabled(false);
+
     delete[] arm9_RAM;
     delete[] axi_RAM;
     delete[] fcram;
@@ -196,6 +206,55 @@ void Emulator::reset(bool cold_boot)
     scheduler.set_clockrate_9(ARM9_CLOCKRATE);
     scheduler.set_clockrate_11(ARM11_CLOCKRATE);
     scheduler.set_clockrate_xtensa(XTENSA_CLOCKRATE);
+}
+
+bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
+{
+    if ((arm11_jit || arm9_jit) && !ARM_CPU::jit_available())
+    {
+        printf("[Emulator] JIT not built in, using the interpreter\n");
+        arm11_jit = arm9_jit = false;
+        set_cpu_backend(false, false);
+        return false;
+    }
+#ifdef BLOSSOM_HAS_JIT
+    if (arm11_jit && !exclusive_monitor)
+        exclusive_monitor = std::make_unique<Dynarmic::ExclusiveMonitor>(4);
+#endif
+    for (int i = 0; i < 4; i++)
+        arm11[i].set_jit_enabled(arm11_jit, exclusive_monitor.get());
+    arm9.set_jit_enabled(arm9_jit);
+    printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s\n", arm11_jit ? "JIT" : "interpreter",
+           arm9_jit ? "JIT" : "interpreter");
+    return true;
+}
+
+bool Emulator::is_arm11_jit() const
+{
+    return arm11[0].is_jit_enabled();
+}
+
+bool Emulator::is_arm9_jit() const
+{
+    return arm9.is_jit_enabled();
+}
+
+void Emulator::apply_cpu_backend_env()
+{
+    const char* env = std::getenv("BLOSSOM_CPU");
+    if (!env || !env[0])
+        return;
+    std::string mode = env;
+    if (mode == "interp" || mode == "interpreter")
+        set_cpu_backend(false, false);
+    else if (mode == "jit")
+        set_cpu_backend(true, true);
+    else if (mode == "jit11")
+        set_cpu_backend(true, false);
+    else if (mode == "jit9")
+        set_cpu_backend(false, true);
+    else
+        printf("[Emulator] Unknown BLOSSOM_CPU=%s (use interp, jit, jit11 or jit9)\n", env);
 }
 
 void Emulator::run()
@@ -348,11 +407,16 @@ bool Emulator::mount_cartridge(std::string file_name)
     return cartridge.mount(file_name);
 }
 
-void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size)
+void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size, int core, bool thumb_entry, uint64_t cycles, int slice)
 {
     reset();
 
-    arm9_pu.add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    ARM_CPU& cpu = (core == 9) ? arm9 : arm11[0];
+    if (core == 9)
+        arm9_pu.add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    else
+        arm11_mmu[0].add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    cpu.set_test_console(true);
 
     uint32_t e_entry = *(uint32_t*)&elf[0x18];
     uint32_t e_phoff = *(uint32_t*)&elf[0x1C];
@@ -391,13 +455,16 @@ void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size)
         }
     }
 
-    arm9.jp(e_entry, true);
+    //An odd entry point (set by the test runner for Thumb-only images) starts in Thumb state
+    cpu.jp(e_entry | thumb_entry, true);
 
     //Switch to system mode
-    arm9.cps((1 << 17) | 0x1F);
-    arm9.set_register(REG_SP, e_entry);
-    //arm9.set_disassembly(true);
-    arm9.run(1024 * 1024);
+    cpu.cps((1 << 17) | 0x1F);
+    cpu.set_register(REG_SP, e_entry);
+    //cpu.set_disassembly(true);
+    //Run in slices like the real scheduler does (an exception ends the interpreter's slice early)
+    for (uint64_t done = 0; done < cycles; done += slice)
+        cpu.run(slice);
 }
 
 uint8_t Emulator::arm9_read8(uint32_t addr)

@@ -14,7 +14,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev
+            cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev libboost-dev
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

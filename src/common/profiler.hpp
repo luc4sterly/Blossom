@@ -25,7 +25,18 @@ enum Bucket
     BUCKET_COUNT
 };
 
+enum Counter
+{
+    JIT_CACHE_CLEARS,
+    JIT_RANGE_INVALIDATIONS,
+    JIT_FALLBACKS,
+    JIT_CONTEXTS,
+    COUNTER_COUNT
+};
+
 extern bool enabled;
+//Per-frame event counters, printed (and reset) by end_frame. Cheap enough to bump unconditionally.
+extern uint64_t counters[COUNTER_COUNT];
 
 void init();
 void enter(Bucket b);

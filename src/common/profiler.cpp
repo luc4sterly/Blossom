@@ -6,6 +6,7 @@ namespace Profiler
 {
 
 bool enabled = false;
+uint64_t counters[COUNTER_COUNT];
 
 namespace
 {
@@ -18,6 +19,11 @@ int depth = 0;
 Clock::time_point last_switch;
 Clock::time_point frame_start;
 double totals[BUCKET_COUNT];
+
+const char* counter_names[COUNTER_COUNT] =
+{
+    "jit-cache-clears", "jit-range-invals", "jit-fallbacks", "jit-new-contexts"
+};
 
 const char* names[BUCKET_COUNT] =
 {
@@ -40,6 +46,8 @@ void init()
     depth = 0;
     for (double& t : totals)
         t = 0;
+    for (uint64_t& c : counters)
+        c = 0;
     last_switch = frame_start = Clock::now();
 }
 
@@ -71,6 +79,12 @@ void end_frame(int frame)
         if (totals[i] >= 0.05)
             std::fprintf(stderr, " %s %.1f (%.0f%%)", names[i], totals[i], total > 0 ? totals[i] * 100.0 / total : 0.0);
         totals[i] = 0;
+    }
+    for (int i = 0; i < COUNTER_COUNT; i++)
+    {
+        if (counters[i])
+            std::fprintf(stderr, " | %s %llu", counter_names[i], (unsigned long long)counters[i]);
+        counters[i] = 0;
     }
     std::fprintf(stderr, "\n");
     frame_start = now;
