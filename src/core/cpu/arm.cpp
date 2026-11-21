@@ -1,5 +1,7 @@
 #include <cstring>
+#include <map>
 #include <sstream>
+#include <utility>
 #include "core/cpu/arm.hpp"
 #include "core/cpu/arm_disasm.hpp"
 #include "core/cpu/arm_interpret.hpp"
@@ -313,6 +315,30 @@ void ARM_CPU::swi()
         //printf("SVC $%02X, PID%d\n", op, read32(process_ptr + 0xB4));
         printf("[ARM%d] SVC $%02X!\n", id, op);
         //printf("SVC $%04X!\n", gpr[7]);
+
+        //Trace of service sessions: remember which handle srv gave out for which name, so that
+        //SendSyncRequest lines can say which service they go to.
+        static std::map<std::pair<int, uint32_t>, std::string> pending_service; //(pid, tls) -> name
+        static std::map<std::pair<int, uint32_t>, std::string> service_handles; //(pid, handle) -> name
+        {
+            uint32_t tls = cp15->mrc(0, 0xD, 0x3, 0x0);
+            int pid;
+            std::string procname;
+            get_hos_process_info(*this, pid, procname);
+            auto it = pending_service.find({pid, tls});
+            if (it != pending_service.end())
+            {
+                //The thread runs again, so srv has replied into its command buffer
+                uint32_t result = read32(tls + 0x84);
+                uint32_t handle = read32(tls + 0x8C);
+                printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
+                       pid, procname.c_str(), it->second.c_str(), result, handle);
+                if (result == 0)
+                    service_handles[{pid, handle}] = it->second;
+                pending_service.erase(it);
+            }
+        }
+
         if (op == 0x32)
         {
             uint32_t tls = cp15->mrc(0, 0xD, 0x3, 0x0);
@@ -321,8 +347,11 @@ void ARM_CPU::swi()
             int pid;
             std::string procname;
             get_hos_process_info(*this, pid, procname);
-            
-            printf("(PID%d[%s]) SendSyncRequest: $%08X\n", pid, procname.c_str(), header);
+
+            auto named = service_handles.find({pid, gpr[0]});
+            printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
+                   gpr[0], named != service_handles.end() ? " = " : "",
+                   named != service_handles.end() ? named->second.c_str() : "");
 
             //srv: GetServiceHandle (0x00050100) and RegisterService (0x00030100) carry the service
             //name in words 1-2. Other services can reuse these headers, so only print printable names.
@@ -336,8 +365,12 @@ void ARM_CPU::swi()
                 for (int i = 0; i < 8 && name[i]; i++)
                     printable &= name[i] >= 0x20 && name[i] < 0x7F;
                 if (printable)
+                {
                     printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
                            header == 0x00050100 ? "GetServiceHandle" : "RegisterService", name);
+                    if (header == 0x00050100)
+                        pending_service[{pid, tls}] = name;
+                }
             }
         }
     }
