@@ -324,6 +324,7 @@ class GPU
         uint32_t cur_cmdlist_ptr;
         uint32_t cur_cmdlist_size;
         bool cmd_engine_busy;
+        bool cmdlist_jumped;
 
         GPU_Context ctx;
 
@@ -402,6 +403,15 @@ class GPU
         void shader_mad(ShaderUnit& sh, uint32_t instr);
 
         void render_fb_pixel(uint8_t* screen, int fb_index, int x, int y);
+
+        //BLOSSOM_TRACE_GPU=1: counters printed once a second, plus the first access to each
+        //register the GPU/LCD code doesn't handle. See GPU::print_debug_stats.
+        struct DebugStats
+        {
+            uint64_t cmdlists, cmd_words, draws, finalize, ppf, memfill[2];
+            uint64_t fb_select[2], fb_addr[2], fill_writes[2];
+        } stats;
+        void note_unknown(char kind, uint32_t addr, uint32_t value);
     public:
         GPU(Emulator* e, Scheduler* scheduler, MPCore_PMR* pmr);
         ~GPU();
@@ -417,9 +427,15 @@ class GPU
 
         void set_lcd_init(bool init);
         void set_screenfill(int index, uint32_t value);
+        uint32_t get_screenfill(int index);
+        bool get_lcd_init();
 
         uint8_t* get_top_buffer();
         uint8_t* get_bottom_buffer();
+
+        static bool trace_enabled();
+        void print_debug_stats(int frame);
+        void note_lcd_access(char kind, uint32_t addr, uint32_t value) { note_unknown(kind, addr, value); }
 };
 
 template <typename T>

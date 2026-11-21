@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <sstream>
 #include <utility>
@@ -15,13 +16,63 @@
 
 //The SVC/IPC trace reads guest memory on every SVC and floods stdout, which ends up costing more
 //than the JIT saves. Enable it with BLOSSOM_TRACE_SVC=1.
-static bool trace_svc_enabled()
+//BLOSSOM_TRACE_SVC=2 prints no per-SVC lines; instead, every 60 frames, each process's SVCs and
+//service requests are counted on one line on stderr (see ARM_CPU::print_svc_stats). Small enough to share.
+static int trace_svc_level()
+{
+    static const int level = [] {
+        const char* env = getenv("BLOSSOM_TRACE_SVC");
+        return env ? atoi(env) : 0;
+    }();
+    return level;
+}
+
+//BLOSSOM_SKIP_SETUP=1: when a process reads cfg block 0x00110000 (system setup required) or
+//0x000D0000 (accepted EULA version), the reply is patched to "setup done" and EULA 0x7F7F, as
+//Azahar does, so NS boots the HOME Menu instead of System Settings' first-time setup.
+static bool skip_setup_enabled()
 {
     static const bool enabled = [] {
-        const char* env = getenv("BLOSSOM_TRACE_SVC");
+        const char* env = getenv("BLOSSOM_SKIP_SETUP");
         return env && env[0] && env[0] != '0';
     }();
     return enabled;
+}
+
+static bool trace_svc_enabled()
+{
+    return trace_svc_level() >= 1 || skip_setup_enabled();
+}
+
+static bool trace_svc_lines()
+{
+    return trace_svc_level() == 1;
+}
+
+struct CfgRequest { uint32_t block, size; };
+static std::deque<CfgRequest> cfg_requests;
+
+//(pid, name) -> (what, count)
+static std::map<std::pair<int, std::string>, std::map<std::string, uint64_t>> svc_stats;
+
+static void count_svc(int pid, const std::string& procname, const std::string& what)
+{
+    if (trace_svc_level() >= 2)
+        svc_stats[{pid, procname}][what]++;
+}
+
+void ARM_CPU::print_svc_stats(int frame)
+{
+    if (trace_svc_level() < 2 || frame % 60)
+        return;
+    for (auto& [proc, counts] : svc_stats)
+    {
+        fprintf(stderr, "[SVCSTAT] frame %d PID%d[%s]:", frame, proc.first, proc.second.c_str());
+        for (auto& [what, n] : counts)
+            fprintf(stderr, " %s x%llu", what.c_str(), (unsigned long long)n);
+        fprintf(stderr, "\n");
+    }
+    svc_stats.clear();
 }
 
 //BLOSSOM_TRACE_MMIO=1 logs every I/O register access by the ARM11 cores to stderr (physical
@@ -517,7 +568,8 @@ void ARM_CPU::swi()
     {
         //uint32_t process_ptr = read32(0xFFFF9004);
         //printf("SVC $%02X, PID%d\n", op, read32(process_ptr + 0xB4));
-        printf("[ARM%d] SVC $%02X!\n", id, op);
+        if (trace_svc_lines())
+            printf("[ARM%d] SVC $%02X!\n", id, op);
         //printf("SVC $%04X!\n", gpr[7]);
 
         //Trace of service sessions: remember which handle srv gave out for which name, so that
@@ -535,11 +587,117 @@ void ARM_CPU::swi()
                 //The thread runs again, so srv has replied into its command buffer
                 uint32_t result = read32(tls + 0x84);
                 uint32_t handle = read32(tls + 0x8C);
-                printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
-                       pid, procname.c_str(), it->second.c_str(), result, handle);
+                if (trace_svc_lines())
+                    printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
+                           pid, procname.c_str(), it->second.c_str(), result, handle);
                 if (result == 0)
                     service_handles[{pid, handle}] = it->second;
                 pending_service.erase(it);
+            }
+            //Result of this thread's last service request: the reply sits in its command buffer
+            //when it next does an SVC (if it hasn't written a new request with another command
+            //id yet). Failures are counted as "FAIL service:header=result".
+            struct PendingReply { std::string service; uint32_t header, block, size, ptr; };
+            static std::map<std::pair<int, uint32_t>, PendingReply> pending_reply;
+            auto rep_it = pending_reply.find({pid, tls});
+            if (rep_it != pending_reply.end())
+            {
+                uint32_t reply_header = read32(tls + 0x80);
+                uint32_t result = read32(tls + 0x84);
+                const PendingReply& pr = rep_it->second;
+                bool same_cmd = (reply_header >> 16) == (pr.header >> 16);
+                if (same_cmd && (result & 0x80000000))
+                {
+                    char what[96];
+                    snprintf(what, sizeof(what), "FAIL %s:%08X=%08X", pr.service.c_str(),
+                             pr.header, result);
+                    count_svc(pid, procname, what);
+                    if (trace_svc_level() >= 2)
+                    {
+                        static int fail_lines = 0;
+                        if (fail_lines++ < 400)
+                            fprintf(stderr, "[SVCFAIL] PID%d[%s] %s\n", pid, procname.c_str(), what);
+                    }
+                }
+                pending_reply.erase(rep_it);
+            }
+            if (op == 0x32)
+            {
+                auto named = service_handles.find({pid, gpr[0]});
+                uint32_t hdr = read32(tls + 0x80);
+                PendingReply pr{named != service_handles.end() ? named->second : "?", hdr, 0, 0, 0};
+                //cfg GetConfigInfoBlk2 / GetConfigInfoBlk8 (cfg:s) / GetConfigInfoBlk8 (cfg:i):
+                //size, block ID, buffer descriptor, buffer pointer
+                if ((hdr == 0x00010082 || hdr == 0x04010082 || hdr == 0x08010082)
+                    && pr.service.rfind("cfg:", 0) == 0)
+                {
+                    pr.size = read32(tls + 0x84);
+                    pr.block = read32(tls + 0x88);
+                    pr.ptr = read32(tls + 0x90);
+                    if (skip_setup_enabled())
+                    {
+                        cfg_requests.push_back({pr.block, pr.size});
+                        if (cfg_requests.size() > 64)
+                            cfg_requests.pop_front();
+                    }
+                }
+                pending_reply[{pid, tls}] = pr;
+                if (hdr == 0x00010800)
+                {
+                    //err:f ThrowFatalError: type, result code, PC, PID, title IDs
+                    uint32_t w[9];
+                    for (int i = 0; i < 9; i++)
+                        w[i] = read32(tls + 0x84 + i * 4);
+                    fprintf(stderr, "[ERRF] PID%d[%s] type %d result $%08X pc $%08X pid $%X "
+                            "title %08X %08X app %08X %08X\n", pid, procname.c_str(), w[0] & 0xFF,
+                            w[1], w[2], w[3], w[5], w[4], w[7], w[6]);
+                }
+            }
+            //The patch is applied on cfg's side, when it replies (svcReplyAndReceive): the block
+            //data is in the mapped buffer, which is still mapped in cfg, and the requester hasn't
+            //run yet. The reply only gives the size, so match it with the oldest request of that size.
+            if (op == 0x4F && skip_setup_enabled() && procname.rfind("cfg", 0) == 0 && gpr[3])
+            {
+                uint32_t hdr = read32(tls + 0x80);
+                if (hdr == 0x00010042 || hdr == 0x04010042 || hdr == 0x08010042)
+                {
+                    uint32_t result = read32(tls + 0x84);
+                    uint32_t size = read32(tls + 0x88) >> 4;
+                    uint32_t ptr = read32(tls + 0x8C);
+                    for (auto req = cfg_requests.begin(); req != cfg_requests.end(); ++req)
+                    {
+                        if (req->size != size)
+                            continue;
+                        uint32_t block = req->block;
+                        cfg_requests.erase(req);
+                        if (result != 0)
+                            break;
+                        try
+                        {
+                            if (block == 0x00110000 && size >= 1)
+                            {
+                                write8(ptr, 1);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x00110000 -> setup done\n");
+                            }
+                            else if (block == 0x000D0000 && size >= 2)
+                            {
+                                write8(ptr, 0x7F);
+                                write8(ptr + 1, 0x7F);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x000D0000 -> EULA 7F.7F\n");
+                            }
+                        }
+                        catch (const EmuException::ARMDataAbort&)
+                        {
+                        }
+                        break;
+                    }
+                }
+            }
+            if (op != 0x32)
+            {
+                char what[16];
+                snprintf(what, sizeof(what), "svc%02X", op);
+                count_svc(pid, procname, what);
             }
         }
 
@@ -553,7 +711,14 @@ void ARM_CPU::swi()
             get_hos_process_info(*this, pid, procname);
 
             auto named = service_handles.find({pid, gpr[0]});
-            printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
+            {
+                char what[64];
+                snprintf(what, sizeof(what), "%s:%08X",
+                         named != service_handles.end() ? named->second.c_str() : "?", header);
+                count_svc(pid, procname, what);
+            }
+            if (trace_svc_lines())
+                printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
                    gpr[0], named != service_handles.end() ? " = " : "",
                    named != service_handles.end() ? named->second.c_str() : "");
 
@@ -570,7 +735,8 @@ void ARM_CPU::swi()
                     printable &= name[i] >= 0x20 && name[i] < 0x7F;
                 if (printable)
                 {
-                    printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
+                    if (trace_svc_lines())
+                        printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
                            header == 0x00050100 ? "GetServiceHandle" : "RegisterService", name);
                     if (header == 0x00050100)
                         pending_service[{pid, tls}] = name;
@@ -632,7 +798,7 @@ void ARM_CPU::int_check()
 #endif
     if (!CPSR.irq_disable)
     {
-        if (trace_svc_enabled())
+        if (trace_svc_lines())
             printf("[ARM%d] Interrupt!\n", id);
         uint32_t value = CPSR.get();
         SPSR[PSR_IRQ].set(value);
