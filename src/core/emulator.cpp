@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include "common/common.hpp"
 #include "core/emulator.hpp"
 
@@ -52,6 +53,10 @@ Emulator::Emulator() :
 
 Emulator::~Emulator()
 {
+    watchdog_stop = true;
+    if (watchdog.joinable())
+        watchdog.join();
+
     //The JITs reference the exclusive monitor; drop them first
     arm9.set_jit_enabled(false);
     for (int i = 0; i < 4; i++)
@@ -264,8 +269,77 @@ void Emulator::apply_cpu_backend_env()
         printf("[Emulator] Unknown BLOSSOM_CPU=%s (use interp, jit, jit11 or jit9)\n", env);
 }
 
+static int64_t now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void Emulator::start_watchdog()
+{
+    if (watchdog.joinable())
+        return;
+    const char* env = getenv("BLOSSOM_WATCHDOG");
+    if (env && env[0] == '0')
+        return;
+    last_frame_end_ms = now_ms();
+    watchdog = std::thread([this] { watchdog_loop(); });
+}
+
+void Emulator::watchdog_report(const char* reason, long mb)
+{
+    //Everything here is read without locks while the emulator thread runs: good enough to see
+    //where it is stuck, not exact
+    fprintf(stderr, "[WATCHDOG] %s: frame %d, ram %ld MB, pending events %zu\n", reason, frames, mb,
+            scheduler.event_count());
+    int stack[32];
+    int n = Profiler::stack_snapshot(stack, 32);
+    fprintf(stderr, "[WATCHDOG] profiler scope (needs BLOSSOM_PROFILE=1):");
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, " %s", Profiler::bucket_name(stack[i]));
+    fprintf(stderr, "\n[WATCHDOG] PCs: arm11 $%08X%s $%08X%s | arm9 $%08X%s\n",
+            arm11[0].debug_pc(), arm11[0].is_halted() ? " halt" : "",
+            arm11[1].debug_pc(), arm11[1].is_halted() ? " halt" : "",
+            arm9.debug_pc(), arm9.is_halted() ? " halt" : "");
+    fprintf(stderr, "[WATCHDOG] counters this frame:");
+    for (int i = 0; i < Profiler::COUNTER_COUNT; i++)
+        fprintf(stderr, " %llu", (unsigned long long)Profiler::counters[i]);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
+void Emulator::watchdog_loop()
+{
+    static const long max_mb = [] {
+        const char* env = getenv("BLOSSOM_MAX_RAM_MB");
+        return env ? atol(env) : 4096L;
+    }();
+    int64_t last_report = 0;
+    while (!watchdog_stop)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        long mb = Profiler::resident_mb();
+        if (max_mb > 0 && mb > max_mb)
+        {
+            watchdog_report("memory limit passed, stopping", mb);
+            //Twice, a second apart, to show what keeps running
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            watchdog_report("memory limit passed, stopping", Profiler::resident_mb());
+            fflush(stdout);
+            std::_Exit(3);
+        }
+        int64_t now = now_ms();
+        if (now - last_frame_end_ms > 10000 && now - last_report > 5000)
+        {
+            watchdog_report("frame running for more than 10 s", mb);
+            last_report = now;
+        }
+    }
+}
+
 void Emulator::run()
 {
+    start_watchdog();
     i2c.update_time();
     printf("FRAME %d\n", frames);
 
@@ -345,6 +419,7 @@ void Emulator::run()
     gpu.print_debug_stats(frames);
     ARM_CPU::print_svc_stats(frames);
     Profiler::end_frame(frames);
+    last_frame_end_ms = now_ms();
     if (Profiler::enabled)
     {
         //Where each core is at the end of the frame: a core stuck in a loop shows the same PCs

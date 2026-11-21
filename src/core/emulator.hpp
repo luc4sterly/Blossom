@@ -1,7 +1,9 @@
 #ifndef EMULATOR_HPP
 #define EMULATOR_HPP
 #include <cstdint>
+#include <atomic>
 #include <memory>
+#include <thread>
 #include "core/arm9/aes.hpp"
 #include "core/arm9/cartridge.hpp"
 #include "core/arm9/dma9.hpp"
@@ -110,6 +112,15 @@ class Emulator
         bool set_cpu_backend(bool arm11_jit, bool arm9_jit);
         void pxi_sync_point(bool from_arm9);
         uint64_t memory_check_counter = 0;
+
+        //Watchdog thread: reports where the emulator is when a frame takes too long or memory
+        //grows past BLOSSOM_MAX_RAM_MB, and stops the process in the second case
+        std::thread watchdog;
+        std::atomic<bool> watchdog_stop{false};
+        std::atomic<int64_t> last_frame_end_ms{0};
+        void start_watchdog();
+        void watchdog_loop();
+        void watchdog_report(const char* reason, long mb);
         bool is_arm11_jit() const;
         bool is_arm9_jit() const;
         //Reads BLOSSOM_CPU (interp, jit, jit11 = JIT on ARM11 only) and applies it if set.

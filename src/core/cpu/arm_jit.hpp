@@ -44,6 +44,9 @@ class ARM_JIT final : public Dynarmic::A32::UserCallbacks
         //Asks Jit::Run to return after the current instruction and ends the slice
         void end_slice();
 
+        //PC inside the JIT, read from another thread by the watchdog (racy, diagnostics only)
+        uint32_t live_pc() { return jit->Regs()[15]; }
+
         //Called after the interpreter executed an MCR to CP15. op = (CRn << 8) | (CRm << 4) | opc2
         void on_cp15_write(uint32_t op, uint32_t value, bool mapping_changed);
 

@@ -60,6 +60,9 @@ void leave();
 void end_frame(int frame);
 //Resident memory of the process in MB, or -1 if unknown
 long resident_mb();
+//Name of a bucket, and a racy snapshot of the bucket stack (innermost last) for the watchdog thread
+const char* bucket_name(int bucket);
+int stack_snapshot(int* out, int max);
 
 class Scope
 {

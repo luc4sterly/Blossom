@@ -43,6 +43,7 @@ class Scheduler
         int64_t cycles9_to_run;
         int64_t xtensa_cycles_to_run;
     public:
+        size_t event_count() const { return events.size(); }
         void set_max_cycles(int cycles) { max_cycles = cycles > 0 ? cycles : 256; }
         Scheduler();
 

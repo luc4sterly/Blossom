@@ -380,6 +380,15 @@ void ARM_CPU::interpret_one()
     }
 }
 
+uint32_t ARM_CPU::debug_pc()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit && in_jit)
+        return jit->live_pc();
+#endif
+    return gpr[15];
+}
+
 void ARM_CPU::end_slice()
 {
     slice_ended = true;

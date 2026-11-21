@@ -125,4 +125,20 @@ void end_frame(int frame)
     frame_start = now;
 }
 
+const char* bucket_name(int bucket)
+{
+    return bucket >= 0 && bucket < BUCKET_COUNT ? names[bucket] : "?";
+}
+
+int stack_snapshot(int* out, int max)
+{
+    int d = depth;
+    if (d > MAX_DEPTH)
+        d = MAX_DEPTH;
+    int n = 0;
+    for (int i = 0; i < d && n < max; i++)
+        out[n++] = stack[i];
+    return n;
+}
+
 }

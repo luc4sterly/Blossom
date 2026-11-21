@@ -127,6 +127,8 @@ class ARM_CPU
 
         bool is_halted();
         uint32_t get_PC();
+        //Where the core is right now, also while it runs in the JIT (for the watchdog)
+        uint32_t debug_pc();
         PSR_Flags* get_CPSR();
 
         uint8_t read8(uint32_t addr);
