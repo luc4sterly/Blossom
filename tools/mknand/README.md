@@ -46,6 +46,21 @@ python3 -m venv .venv && .venv/bin/pip install -r tools/mknand/requirements.txt
     --nand nand_synth.bin --dev-unsigned --autoload-nocart
 ```
 
+### Si AM rehace las bases de datos
+
+En el primer arranque, AM puede descartar `title.db` e `import.db` y crear las suyas vacías
+(junto con `ticket.db`, `certs.db`, `tmp_t.db` y `tmp_i.db`). En ese caso, después de arrancar
+una vez:
+
+```sh
+# qué bases de datos hay, su geometría y si su CMAC cuadra con las claves de esta NAND
+.venv/bin/python tools/mknand/mknand.py --boot9 boot9.bin --inspect-dbs nand_synth.bin
+
+# añadir los títulos al title.db que creó AM, respetando su geometría, y volver a firmarlo
+.venv/bin/python tools/mknand/mknand.py --boot9 boot9.bin --update-dbs nand_synth.bin \
+    --cias /ruta/a/11.17.0-50E.OLD/
+```
+
 Opciones útiles:
 
 - `--cias RUTA...`: CIA sueltos o carpetas con CIA. Los títulos TWL (`0004800x…`) se saltan de momento.

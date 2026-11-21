@@ -94,43 +94,81 @@ def file_hash(parent: int, title_id: int) -> int:
     return h
 
 
-class BDRI:
-    """An empty title database file system, with title info entries added one by one."""
+@dataclass
+class Geometry:
+    """Where things are inside a BDRI image (offsets relative to the BDRI header, after the pre-header)."""
+    block_size: int = BLOCK_SIZE
+    dir_hash_offset: int = DIR_HASH_OFFSET
+    dir_hash_buckets: int = DIR_HASH_BUCKETS
+    file_hash_offset: int = FILE_HASH_OFFSET
+    file_hash_buckets: int = FILE_HASH_BUCKETS
+    fat_offset: int = FAT_OFFSET
+    fat_entries: int = DATA_BLOCKS
+    data_offset: int = DATA_OFFSET
+    data_blocks: int = DATA_BLOCKS
+    dir_table_block: int = DIR_TABLE_BLOCK
+    dir_table_blocks: int = DIR_TABLE_BLOCKS
+    max_dirs: int = MAX_DIRS
+    file_table_block: int = FILE_TABLE_BLOCK
+    file_table_blocks: int = FILE_TABLE_BLOCKS
+    max_files: int = MAX_FILES
 
-    def __init__(self, magic: bytes):
+    FS_INFO = '<IIQIIQIIQIIQIIIIIIIIII'
+
+    @classmethod
+    def parse(cls, img: bytes) -> 'Geometry':
+        b = PREHEADER_SIZE
+        if img[b:b + 4] != b'BDRI':
+            raise TitleDBError('BDRI magic not found')
+        fs_info_off = struct.unpack_from('<Q', img, b + 8)[0]
+        v = struct.unpack_from(cls.FS_INFO, img, b + fs_info_off)
+        return cls(block_size=v[1], dir_hash_offset=v[2], dir_hash_buckets=v[3], file_hash_offset=v[5],
+                   file_hash_buckets=v[6], fat_offset=v[8], fat_entries=v[9], data_offset=v[11],
+                   data_blocks=v[12], dir_table_block=v[14], dir_table_blocks=v[15], max_dirs=v[16],
+                   file_table_block=v[18], file_table_blocks=v[19], max_files=v[20])
+
+
+class BDRI:
+    """
+    A title database file system. `BDRI(magic)` makes an empty one with AM's default geometry;
+    `BDRI.from_image(img)` opens an existing one (for example one AM created on first boot).
+    """
+
+    def __init__(self, magic: bytes, geometry: Geometry | None = None):
+        g = self.g = geometry or Geometry()
         size = IVFC_LEVELS[3][1]
         self.img = bytearray(size)
         self.img[0:8] = magic
         b = PREHEADER_SIZE
-        struct.pack_into('<4sIQQI', self.img, b, b'BDRI', 0x30000, FS_INFO_OFFSET, size // BLOCK_SIZE, BLOCK_SIZE)
-        struct.pack_into('<IIQIIQIIQIIQIIIIIIIIII', self.img, b + FS_INFO_OFFSET,
-                         0, BLOCK_SIZE,
-                         DIR_HASH_OFFSET, DIR_HASH_BUCKETS, 0,
-                         FILE_HASH_OFFSET, FILE_HASH_BUCKETS, 0,
-                         FAT_OFFSET, DATA_BLOCKS, 0,
-                         DATA_OFFSET, DATA_BLOCKS, 0,
-                         DIR_TABLE_BLOCK, DIR_TABLE_BLOCKS, MAX_DIRS, 0,
-                         FILE_TABLE_BLOCK, FILE_TABLE_BLOCKS, MAX_FILES, 0)
+        struct.pack_into('<4sIQQI', self.img, b, b'BDRI', 0x30000, FS_INFO_OFFSET, size // g.block_size, g.block_size)
+        struct.pack_into(Geometry.FS_INFO, self.img, b + FS_INFO_OFFSET,
+                         0, g.block_size,
+                         g.dir_hash_offset, g.dir_hash_buckets, 0,
+                         g.file_hash_offset, g.file_hash_buckets, 0,
+                         g.fat_offset, g.fat_entries, 0,
+                         g.data_offset, g.data_blocks, 0,
+                         g.dir_table_block, g.dir_table_blocks, g.max_dirs, 0,
+                         g.file_table_block, g.file_table_blocks, g.max_files, 0)
 
-        # Directory table: dummy head (2 entries in use, 3 slots) and an empty root.
-        self._dir_entry(0)[0:8] = struct.pack('<II', 2, MAX_DIRS + 2)
-        struct.pack_into('<I', self.img, b + DIR_HASH_OFFSET, ROOT_DIR)
+        # Directory table: dummy head (2 entries in use) and an empty root.
+        self._dir_entry(0)[0:8] = struct.pack('<II', 2, g.max_dirs + 2)
+        struct.pack_into('<I', self.img, b + g.dir_hash_offset, ROOT_DIR)
 
-        # File table: every slot is on the free (dummy) list, head -> 0x2000 -> ... -> 1 -> end.
-        for k in range(MAX_FILES + 1):
+        # File table: every slot is on the free (dummy) list, head -> max -> ... -> 1 -> end.
+        for k in range(g.max_files + 1):
             e = self._file_entry(k)
-            e[0:8] = struct.pack('<II', MAX_FILES + 1, MAX_FILES + 1)
-            struct.pack_into('<I', e, 0x28, MAX_FILES if k == 0 else k - 1)
+            e[0:8] = struct.pack('<II', g.max_files + 1, g.max_files + 1)
+            struct.pack_into('<I', e, 0x28, g.max_files if k == 0 else k - 1)
 
         # FAT: the two tables are allocated nodes, all other blocks form one free chain of
         # single-block nodes (FAT entry = block + 1).
         self._fat_set(0, 0, 0)
-        self._alloc_node(DIR_TABLE_BLOCK + 1, DIR_TABLE_BLOCKS)
-        self._alloc_node(FILE_TABLE_BLOCK + 1, FILE_TABLE_BLOCKS)
-        first_free = FILE_TABLE_BLOCK + FILE_TABLE_BLOCKS + 1
+        self._alloc_node(g.dir_table_block + 1, g.dir_table_blocks)
+        self._alloc_node(g.file_table_block + 1, g.file_table_blocks)
+        first_free = g.file_table_block + g.file_table_blocks + 1
         # The last data block runs 0x80 bytes past the end of the image (a quirk of AM's layout),
         # so it is never handed out.
-        free = list(range(first_free, DATA_BLOCKS))
+        free = list(range(first_free, g.data_blocks))
         for i, k in enumerate(free):
             prev = free[i - 1] if i else 0
             nxt = free[i + 1] if i + 1 < len(free) else 0
@@ -138,24 +176,33 @@ class BDRI:
         self._fat_set(0, 0, free[0])
         self.titles: list[int] = []
 
+    @classmethod
+    def from_image(cls, img: bytes) -> 'BDRI':
+        self = cls.__new__(cls)
+        self.img = bytearray(img)
+        self.g = Geometry.parse(self.img)
+        self.titles = list(self.read_titles())
+        return self
+
     # -- raw accessors --
 
     def _view(self, off: int, size: int) -> memoryview:
         return memoryview(self.img)[off:off + size]
 
+    def _data(self, block: int) -> int:
+        return PREHEADER_SIZE + self.g.data_offset + block * self.g.block_size
+
     def _dir_entry(self, k: int) -> memoryview:
-        return self._view(PREHEADER_SIZE + DATA_OFFSET + DIR_TABLE_BLOCK * BLOCK_SIZE + k * DIR_ENTRY_SIZE,
-                          DIR_ENTRY_SIZE)
+        return self._view(self._data(self.g.dir_table_block) + k * DIR_ENTRY_SIZE, DIR_ENTRY_SIZE)
 
     def _file_entry(self, k: int) -> memoryview:
-        return self._view(PREHEADER_SIZE + DATA_OFFSET + FILE_TABLE_BLOCK * BLOCK_SIZE + k * FILE_ENTRY_SIZE,
-                          FILE_ENTRY_SIZE)
+        return self._view(self._data(self.g.file_table_block) + k * FILE_ENTRY_SIZE, FILE_ENTRY_SIZE)
 
     def _fat(self, k: int) -> tuple[int, int]:
-        return struct.unpack_from('<II', self.img, PREHEADER_SIZE + FAT_OFFSET + k * 8)
+        return struct.unpack_from('<II', self.img, PREHEADER_SIZE + self.g.fat_offset + k * 8)
 
     def _fat_set(self, k: int, u: int, v: int) -> None:
-        struct.pack_into('<II', self.img, PREHEADER_SIZE + FAT_OFFSET + k * 8, u, v)
+        struct.pack_into('<II', self.img, PREHEADER_SIZE + self.g.fat_offset + k * 8, u, v)
 
     def _alloc_node(self, k: int, n: int) -> None:
         """Mark FAT entries k..k+n-1 as a single-node chain."""
@@ -167,39 +214,68 @@ class BDRI:
             self._fat_set(k + n - 1, 0x80000000 | k, k + n - 1)
 
     def _pop_free_block(self) -> int:
+        """Take the first block of the free chain (splitting a multi-block free node if needed)."""
         _, head = self._fat(0)
         if head == 0:
             raise TitleDBError('title database is full')
-        _, nxt = self._fat(head)
-        self._fat_set(0, 0, nxt)
-        if nxt:
-            _, nxt_v = self._fat(nxt)
-            self._fat_set(nxt, 0x80000000, nxt_v)
+        u, v = self._fat(head)
+        multi = bool(v & 0x80000000)
+        nxt = v & 0x7FFFFFFF
+        if multi:
+            # Free node head..end: give away `head`, the rest becomes a node starting at head+1.
+            _, end = self._fat(head + 1)
+            new = head + 1
+            if new == end:
+                self._fat_set(new, 0x80000000, nxt)
+            else:
+                self._fat_set(new, 0x80000000, nxt | 0x80000000)
+                self._fat_set(new + 1, 0x80000000 | new, end)
+                self._fat_set(end, 0x80000000 | new, end)
+            if nxt:
+                _, nv = self._fat(nxt)
+                self._fat_set(nxt, new, nv)
+            self._fat_set(0, 0, new)
+        else:
+            self._fat_set(0, 0, nxt)
+            if nxt:
+                _, nv = self._fat(nxt)
+                self._fat_set(nxt, 0x80000000, nv)
         self._alloc_node(head, 1)
         return head - 1
 
     def _pop_free_file_entry(self) -> int:
         head = struct.unpack_from('<I', self._file_entry(0), 0x28)[0]
-        if head == 0:
+        if head:
+            nxt = struct.unpack_from('<I', self._file_entry(head), 0x28)[0]
+            struct.pack_into('<I', self._file_entry(0), 0x28, nxt)
+            return head
+        # No recycled entry: take a fresh one after the high-water mark.
+        count, maximum = struct.unpack_from('<II', self._file_entry(0), 0)
+        if count >= maximum:
             raise TitleDBError('no free file entries')
-        nxt = struct.unpack_from('<I', self._file_entry(head), 0x28)[0]
-        struct.pack_into('<I', self._file_entry(0), 0x28, nxt)
-        return head
+        struct.pack_into('<I', self._file_entry(0), 0, count + 1)
+        return count
+
+    def _bucket_off(self, title_id: int) -> int:
+        return (PREHEADER_SIZE + self.g.file_hash_offset
+                + (file_hash(ROOT_DIR, title_id) % self.g.file_hash_buckets) * 4)
 
     # -- public --
 
     def add(self, info: TitleInfo) -> None:
         if info.title_id in self.titles:
             raise TitleDBError(f'duplicate title {info.title_id:016x}')
+        if TITLE_ENTRY_SIZE > self.g.block_size:
+            raise TitleDBError('entries larger than one block are not supported')
         block = self._pop_free_block()
         idx = self._pop_free_file_entry()
 
-        data_off = PREHEADER_SIZE + DATA_OFFSET + block * BLOCK_SIZE
+        data_off = self._data(block)
         self.img[data_off:data_off + TITLE_ENTRY_SIZE] = info.to_bytes()
 
         root = self._dir_entry(ROOT_DIR)
         first_file = struct.unpack_from('<I', root, 0x0C)[0]
-        bucket_off = PREHEADER_SIZE + FILE_HASH_OFFSET + (file_hash(ROOT_DIR, info.title_id) % FILE_HASH_BUCKETS) * 4
+        bucket_off = self._bucket_off(info.title_id)
         bucket_head = struct.unpack_from('<I', self.img, bucket_off)[0]
 
         e = self._file_entry(idx)
@@ -221,24 +297,23 @@ class BDRI:
             e = self._file_entry(idx)
             parent, tid, nxt = struct.unpack_from('<IQI', e, 0)
             block, size = struct.unpack_from('<IQ', e, 0x14)
-            off = PREHEADER_SIZE + DATA_OFFSET + block * BLOCK_SIZE
+            off = self._data(block)
             out[tid] = bytes(self.img[off:off + size])
             idx = nxt
             seen += 1
-            if seen > MAX_FILES:
+            if seen > self.g.max_files:
                 raise TitleDBError('file list loops')
         return out
 
     def lookup(self, title_id: int) -> bytes | None:
         """Find a title through the hash table, as Process9 does."""
-        bucket_off = PREHEADER_SIZE + FILE_HASH_OFFSET + (file_hash(ROOT_DIR, title_id) % FILE_HASH_BUCKETS) * 4
-        idx = struct.unpack_from('<I', self.img, bucket_off)[0]
+        idx = struct.unpack_from('<I', self.img, self._bucket_off(title_id))[0]
         while idx:
             e = self._file_entry(idx)
             parent, tid = struct.unpack_from('<IQ', e, 0)
             if parent == ROOT_DIR and tid == title_id:
                 block, size = struct.unpack_from('<IQ', e, 0x14)
-                off = PREHEADER_SIZE + DATA_OFFSET + block * BLOCK_SIZE
+                off = self._data(block)
                 return bytes(self.img[off:off + size])
             idx = struct.unpack_from('<I', e, 0x28)[0]
         return None
@@ -314,3 +389,78 @@ def build_database(db: tuple[int, bytes], titles: list[TitleInfo], crypto) -> by
     for t in titles:
         fs.add(t)
     return sign_diff(build_diff(bytes(fs.img)), db_id, crypto)
+
+
+def read_diff(raw: bytes) -> bytes:
+    """Return the IVFC level 4 content (the BDRI image) of any DIFF file, checking its hashes."""
+    import io
+    from pyctr.crypto import CryptoEngine
+    from pyctr.type.save.diff import DIFF
+    from pyctr.type.save.partdesc.ivfc import IVFCLevel4Reader
+    diff = DIFF(io.BytesIO(raw), crypto=CryptoEngine(setup_b9_keys=False))
+    data = IVFCLevel4Reader(diff.partitions[0].ivfc_hash_tree, verify=False).read()
+    return data
+
+
+def rewrite_diff(raw: bytes, lv4: bytes) -> bytes:
+    """
+    Put new level-4 content into an existing DIFF file, keeping its geometry: rebuild the whole
+    IVFC tree, flatten the DPFS tree onto its first copies and update the partition descriptor
+    and header hash. The CMAC is not touched (call sign_diff afterwards).
+    """
+    from pyctr.type.save.partition import load_partdesc, partdesc_to_bytes
+
+    out = bytearray(raw)
+    h = out[0x100:0x200]
+    if h[0:8] != b'DIFF\0\0\3\0':
+        raise TitleDBError('not a DIFF file')
+    sec_off, pri_off, pd_size, part_off, part_size = struct.unpack_from('<QQQQQ', h, 8)
+    active = struct.unpack_from('<I', h, 0x30)[0]
+    pd_off = pri_off if active == 0 else sec_off
+    difi, ivfc, dpfs, master = load_partdesc(bytes(out[pd_off:pd_off + pd_size]))
+    if len(lv4) != ivfc.lv4.size:
+        raise TitleDBError(f'level 4 size {len(lv4):#x} != {ivfc.lv4.size:#x}')
+
+    levels = [bytes(lv4)]
+    for lvl in (ivfc.lv3, ivfc.lv2, ivfc.lv1):
+        data = _hash_level(levels[-1], lvl.block_size)
+        levels.append(data.ljust(lvl.size, b'\0')[:lvl.size])
+    lv1 = levels[-1]
+    master = [hashlib.sha256(lv1[i:i + ivfc.lv1.block_size].ljust(ivfc.lv1.block_size, b'\0')).digest()
+              for i in range(0, len(lv1), ivfc.lv1.block_size)]
+
+    l3 = bytearray(out[part_off + dpfs.lv3.offset:part_off + dpfs.lv3.offset + dpfs.lv3.size])
+    for lvl, data in zip((ivfc.lv1, ivfc.lv2, ivfc.lv3), (levels[3], levels[2], levels[1])):
+        l3[lvl.offset:lvl.offset + lvl.size] = data
+    if difi.enable_external_ivfc_lv4:
+        o = part_off + difi.external_ivfc_lv4_offset
+        out[o:o + len(lv4)] = lv4
+    else:
+        l3[ivfc.lv4.offset:ivfc.lv4.offset + len(lv4)] = lv4
+
+    # DPFS: all selector bits 0, so the first copy of each level-3 block is the live one.
+    for lvl in (dpfs.lv1, dpfs.lv2):
+        o = part_off + lvl.offset
+        out[o:o + lvl.size * 2] = bytes(lvl.size * 2)
+    o = part_off + dpfs.lv3.offset
+    out[o:o + len(l3)] = l3
+
+    difi = difi._replace(dpfs_tree_lv1_selector=0)
+    pd = partdesc_to_bytes(difi, ivfc, dpfs, master, pd_size)
+    out[pd_off:pd_off + pd_size] = pd
+    out[0x134:0x154] = hashlib.sha256(pd).digest()
+    return bytes(out)
+
+
+def check_cmac(raw: bytes, db_id: int, crypto) -> bool:
+    return sign_diff(raw, db_id, crypto)[:0x10] == raw[:0x10]
+
+
+def add_titles_to_existing(raw: bytes, db: tuple[int, bytes], titles: list[TitleInfo], crypto) -> bytes:
+    """Add title entries to a database AM created (keeping its geometry) and re-sign it."""
+    db_id, _ = db
+    fs = BDRI.from_image(read_diff(raw))
+    for t in titles:
+        if t.title_id not in fs.titles:
+            fs.add(t)
+    return sign_diff(rewrite_diff(raw, bytes(fs.img)), db_id, crypto)

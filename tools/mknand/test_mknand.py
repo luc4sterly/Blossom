@@ -140,6 +140,55 @@ class TitleDB(unittest.TestCase):
         self.assertEqual(IVFCLevel4Reader(diff.partitions[0].ivfc_hash_tree).read(), bytes(fs.img))
 
 
+def _am_style_empty_db(titledb):
+    """An empty title.db like AM might make: smaller tables and one multi-block free node."""
+    g = titledb.Geometry(file_hash_buckets=0x101, max_files=0x40, file_table_blocks=0x17)
+    fs = titledb.BDRI(b'NANDTDB\0', g)
+    first = g.file_table_block + g.file_table_blocks + 1
+    last = g.data_blocks - 1
+    fs._fat_set(0, 0, first)
+    fs._fat_set(first, 0x80000000, 0x80000000)
+    fs._fat_set(first + 1, 0x80000000 | first, last)
+    fs._fat_set(last, 0x80000000 | first, last)
+    # file table never used: high-water mark 1, empty recycle list
+    e0 = fs._file_entry(0)
+    struct.pack_into('<II', e0, 0, 1, g.max_files + 1)
+    struct.pack_into('<I', e0, 0x28, 0)
+    return fs
+
+
+class ExistingDatabases(unittest.TestCase):
+    def test_add_to_am_style_db(self):
+        import titledb
+        fs = _am_style_empty_db(titledb)
+        img = titledb.BDRI.from_image(bytes(fs.img))
+        tids = [0x0004013000001502 + i * 0x100 for i in range(30)]
+        for t in tids:
+            img.add(titledb.TitleInfo(title_id=t, size=0x8000, version=t & 0xFFFF))
+        for t in tids:
+            entry = img.lookup(t)
+            self.assertIsNotNone(entry)
+            self.assertEqual(struct.unpack_from('<H', entry, 0x0C)[0], t & 0xFFFF)
+        blocks = [struct.unpack_from('<I', img._file_entry(i), 0x14)[0] for i in range(1, 31)]
+        self.assertEqual(len(set(blocks)), 30)
+
+    @unittest.skipIf(pyctr_engine is None, 'pyctr is not installed')
+    def test_rewrite_diff_keeps_geometry_and_hashes(self):
+        import titledb
+        fs = _am_style_empty_db(titledb)
+        raw = titledb.build_diff(bytes(fs.img))
+        img = titledb.BDRI.from_image(titledb.read_diff(raw))
+        img.add(titledb.TitleInfo(title_id=0x0004013000008002, size=0x8000))
+        new = titledb.rewrite_diff(raw, bytes(img.img))
+        self.assertEqual(len(new), len(raw))
+        self.assertEqual(titledb.read_diff(new), bytes(img.img))
+        from pyctr.crypto import CryptoEngine
+        from pyctr.type.save.diff import DIFF
+        from pyctr.type.save.partdesc.ivfc import IVFCLevel4Reader
+        d = DIFF(io.BytesIO(new), crypto=CryptoEngine(setup_b9_keys=False))
+        self.assertNotIn(b'\xDD' * 0x200, IVFCLevel4Reader(d.partitions[0].ivfc_hash_tree, verify=True).read())
+
+
 class _FakeRecord:
     def __init__(self, cid, cindex, size):
         self.id, self.cindex, self.size = cid, cindex, size
@@ -223,6 +272,41 @@ class InstallTitlesWithFakeCIAs(unittest.TestCase):
                 for d in mknand.TWLN_DIRS:
                     self.assertTrue(vol.isdir(d), d)
                 vol.close()
+        finally:
+            cia_mod.CIAReader = real
+
+    def test_update_dbs_on_an_am_made_title_db(self):
+        import pyctr.type.cia as cia_mod
+        import titledb
+        real = cia_mod.CIAReader
+        cia_mod.CIAReader = _FakeCIA
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_b9 = random.Random(9).randbytes(0x10000)
+                b9_path = os.path.join(tmp, 'fake_boot9.bin')
+                with open(b9_path, 'wb') as f:
+                    f.write(fake_b9)
+                pyctr_engine.BOOT9_PROT_HASH = hashlib.sha256(fake_b9[0x8000:]).hexdigest()
+                cia = os.path.join(tmp, '0004013000008002.cia')
+                open(cia, 'wb').close()
+                out = os.path.join(tmp, 'nand.bin')
+                mknand.build_nand(out, b9_path, b'FIRM' + bytes(0x100), 'am', [], log=lambda *_: None)
+
+                # Pretend AM replaced the databases on first boot
+                m = mknand.MountedCTRNAND(out, b9_path, writable=True)
+                m.fs.remove('/dbs/title.db')
+                with m.fs.openbin('/dbs/TITLE.DB', 'w') as f:
+                    f.write(titledb.sign_diff(titledb.build_diff(bytes(_am_style_empty_db(titledb).img)),
+                                              2, m.crypto))
+                m.save()
+                m.close()
+
+                self.assertEqual(mknand.update_dbs(out, b9_path, [cia], log=lambda *_: None), 1)
+                lines = mknand.inspect_dbs(out, b9_path)
+                title_line = [l for l in lines if l.lower().startswith('title.db')][0]
+                self.assertIn('CMAC OK', title_line)
+                self.assertIn('entries 1', title_line)
+                self.assertIn('max files 0x40', title_line)
         finally:
             cia_mod.CIAReader = real
 

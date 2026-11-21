@@ -298,13 +298,15 @@ def _extdata_id(cia, boot9_path: str) -> int:
         return 0
 
 
-def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> list[InstalledTitle]:
+def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print,
+                   write_files: bool = True) -> list[InstalledTitle]:
     """
     Install CTR titles from CIAs into a mounted CTRNAND file system (a pyfs-style object).
 
     Each title goes to /title/<high>/<low>/content/ as 00000000.tmd plus one <content id>.app per
     content in the CIA, with the title-key layer removed (NCCH encryption stays, as on a console).
-    Returns what dbs/title.db needs for each title.
+    Returns what dbs/title.db needs for each title. With write_files=False (volume may be None)
+    it only computes that.
     """
     from pyctr.type.cia import CIAReader, CIASection
     from titledb import TitleInfo
@@ -317,10 +319,11 @@ def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> 
                 log(f'skip {tid}: TWL title (TWL NAND is not filled yet)')
                 continue
             base = f'/title/{tid[0:8]}/{tid[8:16]}/content'
-            volume.makedirs(base, recreate=True)
-            with cia.open_raw_section(CIASection.TitleMetadata) as src, \
-                    volume.openbin(f'{base}/00000000.tmd', 'w') as dst:
-                dst.write(src.read())
+            if write_files:
+                volume.makedirs(base, recreate=True)
+                with cia.open_raw_section(CIASection.TitleMetadata) as src, \
+                        volume.openbin(f'{base}/00000000.tmd', 'w') as dst:
+                    dst.write(src.read())
             total = 0
             names = []
             content0_head = b''
@@ -329,9 +332,10 @@ def install_titles(volume, cia_paths: list[str], boot9_path: str, log=print) -> 
                     with cia.open_raw_section(0) as src:
                         content0_head = src.read(0x200)
                 name = f'{record.id.lower()}.app'
-                with cia.open_raw_section(record.cindex) as src, volume.openbin(f'{base}/{name}', 'w') as dst:
-                    while chunk := src.read(0x100000):
-                        dst.write(chunk)
+                if write_files:
+                    with cia.open_raw_section(record.cindex) as src, volume.openbin(f'{base}/{name}', 'w') as dst:
+                        while chunk := src.read(0x100000):
+                            dst.write(chunk)
                 total += record.size
                 names.append(name)
             tmd = cia.tmd
@@ -383,6 +387,100 @@ def allocated_ranges(volume_head: bytes) -> list[tuple[int, int]]:
             else:
                 ranges.append((off, cluster))
     return ranges
+
+
+DB_FILES = {'title.db': 2, 'import.db': 3, 'ticket.db': 0, 'certs.db': 1, 'tmp_t.db': 4, 'tmp_i.db': 5}
+
+
+class MountedCTRNAND:
+    """Decrypt an image's CTRNAND to a temporary file and mount it; `save()` encrypts it back."""
+
+    def __init__(self, image: str, boot9_path: str, writable: bool = False):
+        from pyctr.type.nand import NAND
+        from pyfatfs.PyFatFS import PyFatFS
+        self.image, self.writable = image, writable
+        self.crypto = make_crypto(boot9_path)
+        self.nand = NAND(image, mode='rb+' if writable else 'rb', crypto=self.crypto)
+        self.tmp = image + '.ctrnand.tmp'
+        with self.nand.open_ctr_partition(0) as src, open(self.tmp, 'wb') as dst:
+            while chunk := src.read(0x400000):
+                dst.write(chunk)
+        self.fs = PyFatFS(self.tmp)
+
+    def find(self, folder: str, name: str) -> str | None:
+        for entry in self.fs.listdir(folder):
+            if entry.lower() == name.lower():
+                return f'{folder}/{entry}'
+        return None
+
+    def save(self) -> None:
+        self.fs.close()
+        self.fs = None
+        with open(self.tmp, 'rb') as f:
+            head = f.read(0x100000)
+        meta_len = allocated_ranges(head)[0][1]
+        with self.nand.open_ctr_partition(0) as dst:
+            write_volume_encrypted(self.tmp, dst, meta_len)
+
+    def close(self) -> None:
+        if self.fs is not None:
+            self.fs.close()
+        self.nand.close()
+        if os.path.exists(self.tmp):
+            os.remove(self.tmp)
+
+
+def inspect_dbs(image: str, boot9_path: str) -> list[str]:
+    """Describe every database in an image's CTRNAND /dbs (geometry, CMAC check with our keys)."""
+    import titledb
+    lines = []
+    m = MountedCTRNAND(image, boot9_path)
+    try:
+        for entry in sorted(m.fs.listdir('/dbs')):
+            raw = m.fs.readbytes(f'/dbs/{entry}')
+            name = entry.lower()
+            line = f'{entry}: {len(raw):#x} bytes'
+            if raw[0x100:0x104] == b'DIFF' and name in DB_FILES:
+                line += ', CMAC ' + ('OK' if titledb.check_cmac(raw, DB_FILES[name], m.crypto) else 'MISMATCH')
+                try:
+                    lv4 = titledb.read_diff(raw)
+                    line += f', magic {lv4[0:8]!r}'
+                    if lv4[0x80:0x84] == b'BDRI':
+                        fs = titledb.BDRI.from_image(lv4)
+                        g = fs.g
+                        line += (f', BDRI block {g.block_size:#x}, data blocks {g.data_blocks:#x}, '
+                                 f'max files {g.max_files:#x}, buckets {g.file_hash_buckets:#x}, '
+                                 f'entries {len(fs.titles)}')
+                except Exception as e:  # noqa: BLE001 - this is a diagnostic
+                    line += f', could not parse: {e}'
+            lines.append(line)
+    finally:
+        m.close()
+    return lines
+
+
+def update_dbs(image: str, boot9_path: str, cia_paths: list[str], log=print) -> int:
+    """
+    Add the titles from the CIAs to the title.db that AM created in the image on first boot,
+    keeping AM's geometry, and re-sign it with the image's keys. Returns how many were added.
+    """
+    import titledb
+    infos = [t.info for t in install_titles(None, cia_paths, boot9_path, log, write_files=False)]
+    m = MountedCTRNAND(image, boot9_path, writable=True)
+    try:
+        path = m.find('/dbs', 'title.db')
+        if path is None:
+            raise MkNandError('this image has no dbs/title.db yet: boot it once in Blossom first')
+        raw = m.fs.readbytes(path)
+        before = len(titledb.BDRI.from_image(titledb.read_diff(raw)).titles)
+        new = titledb.add_titles_to_existing(raw, titledb.DB_TITLE, infos, m.crypto)
+        with m.fs.openbin(path, 'r+') as f:
+            f.write(new)
+        after = len(titledb.BDRI.from_image(titledb.read_diff(new)).titles)
+        m.save()
+    finally:
+        m.close()
+    return after - before
 
 
 def write_volume_encrypted(src_path: str, dst, meta_len: int, chunk: int = 0x400000) -> None:
@@ -671,11 +769,35 @@ def main(argv=None) -> int:
                         'TWL titles are skipped for now')
     p.add_argument('--seed', help='make the fake OTP/CID reproducible from this text')
     p.add_argument('--no-verify', action='store_true', help='skip re-reading the image after building it')
+    p.add_argument('--inspect-dbs', metavar='IMAGE',
+                   help='do not build: list the databases in an image\'s CTRNAND and check their CMACs')
+    p.add_argument('--update-dbs', metavar='IMAGE',
+                   help='do not build: add the --cias titles to the title.db AM created on first boot')
     p.add_argument('--explain', metavar='IMAGE',
                    help='do not build: print the hashes boot9 computes for an existing image, '
                         'to compare with a SHA log from Blossom')
     if argv is None:
         argv = sys.argv[1:]
+    if '--inspect-dbs' in argv or '--update-dbs' in argv:
+        e = argparse.ArgumentParser()
+        e.add_argument('--boot9', required=True)
+        e.add_argument('--inspect-dbs')
+        e.add_argument('--update-dbs')
+        e.add_argument('--cias', nargs='+')
+        eargs, _ = e.parse_known_args(argv)
+        try:
+            if eargs.update_dbs:
+                if not eargs.cias:
+                    print('error: --update-dbs needs --cias', file=sys.stderr)
+                    return 1
+                added = update_dbs(eargs.update_dbs, eargs.boot9, find_cias(eargs.cias))
+                print(f'added {added} titles to dbs/title.db')
+            for line in inspect_dbs(eargs.inspect_dbs or eargs.update_dbs, eargs.boot9):
+                print(line)
+        except MkNandError as err:
+            print(f'error: {err}', file=sys.stderr)
+            return 1
+        return 0
     if '--explain' in argv:
         # --explain only needs --boot9; the FIRM source is not required.
         e = argparse.ArgumentParser()
