@@ -139,12 +139,6 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
             fprintf(stderr, "[ARM%d] JIT debug switches: %d\n", cpu.id, safe);
     }
 
-    //Block linking on the ARM11 still breaks the boot11/boot9 PXI handshake (core 0 waits in
-    //boot11 for a PXI_SYNC value that never comes), so it stays off there. The ARM9 boots fine
-    //with it. BLOSSOM_JIT_OPT=63 turns it on for both (about 2x faster).
-    if (!is_arm9)
-        conf.optimizations &= ~Dynarmic::OptimizationFlag::BlockLinking;
-
     //BLOSSOM_JIT_OPT=<mask>: dynarmic optimizations to keep (OptimizationFlag bits: 1 block
     //linking, 2 return stack buffer, 4 fast dispatch, 8 get/set elimination, 16 constant
     //propagation, 32 misc IR). Debug aid to find which one breaks something.
