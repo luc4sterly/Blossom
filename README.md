@@ -20,6 +20,8 @@ src/
                arm11/ (GPU, DSP, MPCore, WiFi/Xtensa), scheduler, timers, PXI, I2C, SPI
   blossom_qt/  frontend en Qt 6
   tests/       runner de tests de CPU (armwrestler / thumbwrestler)
+tools/
+  mknand/      genera una NAND sintética de Old 3DS a partir de tu boot9 y el NATIVE_FIRM
 CMakeModules/  módulos de CMake (FindGMP)
 ```
 
@@ -106,3 +108,9 @@ Blossom se distribuye bajo la **GNU GPL v3** (ver [LICENSE.txt](LICENSE.txt)).
 * armwrestler y thumbwrestler, suites de test de CPU ARM.
 
 Blossom es un proyecto independiente y no está afiliado a Nintendo, ni a Corgi3DS, ni a Azahar.
+
+## Sin dump de NAND
+
+Si no tienes un dump de NAND, [`tools/mknand`](tools/mknand/README.md) genera una NAND sintética
+de Old 3DS con un OTP inventado. Se arranca con `--dev-unsigned`. Está en fase experimental: de
+momento solo llega hasta el NATIVE_FIRM, con CTRNAND vacía.

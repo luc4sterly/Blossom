@@ -77,6 +77,7 @@ bool EmuThread::boot_emulator(QString cart_path)
     boot11.close();
 
     e.load_roms(boot9_rom, boot11_rom);
+    e.set_dev_unsigned(Settings::dev_unsigned);
 
     if (!e.mount_nand(Settings::nand_path.toStdString()))
     {

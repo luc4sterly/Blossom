@@ -14,3 +14,8 @@ set_tests_properties(armwrestler PROPERTIES
 add_test(NAME thumbwrestler
     COMMAND blossom-cpu-tests "${CMAKE_CURRENT_SOURCE_DIR}/thumbwrestler.elf")
 set_tests_properties(thumbwrestler PROPERTIES TIMEOUT 120)
+
+# RSA engine: full and single-word exponents (Process9 writes 0x10001 as one word)
+add_executable(blossom-rsa-tests rsa_test.cpp)
+target_link_libraries(blossom-rsa-tests PRIVATE blossom_core blossom_warnings)
+add_test(NAME rsa COMMAND blossom-rsa-tests)

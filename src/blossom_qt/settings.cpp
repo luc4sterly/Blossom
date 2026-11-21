@@ -5,6 +5,7 @@ QString Settings::boot9_path;
 QString Settings::boot11_path;
 QString Settings::nand_path;
 QString Settings::sd_path;
+bool Settings::dev_unsigned = false;
 
 namespace Settings
 {
