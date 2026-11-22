@@ -420,6 +420,9 @@ class GPU
         struct HwRenderer;
         HwRenderer* hw = nullptr;
         std::vector<Vertex> clip_input, clip_output; //process_tri's scratch lists
+        static constexpr uint32_t VTX_CACHE_SIZE = 256;
+        Vertex vtx_cache[VTX_CACHE_SIZE];
+        uint32_t vtx_cache_tag[VTX_CACHE_SIZE];
         void hw_polygon(std::vector<Vertex>& poly);
         void hw_end_session();
         void hw_shutdown();

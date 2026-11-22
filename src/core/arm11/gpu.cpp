@@ -1178,6 +1178,14 @@ void GPU::draw_vtx_array(bool is_indexed)
 
     uint64_t vtx_fmts = ctx.attr_buffer_format_low;
     vtx_fmts |= (uint64_t)ctx.attr_buffer_format_hi << 32ULL;
+
+    //Post-transform vertex cache, as on the PICA: an indexed draw reuses vertices (a quad is
+    //6 indices for 4 vertices), and the vertex shader output only depends on the index within
+    //one draw. Not with the geometry shader, which consumes vertices in groups.
+    const bool use_cache = is_indexed && !ctx.gsh_enabled;
+    if (use_cache)
+        std::fill(std::begin(vtx_cache_tag), std::end(vtx_cache_tag), 0xFFFFFFFFu);
+
     for (unsigned int i = 0; i < ctx.vertices; i++)
     {
         uint16_t index;
@@ -1196,6 +1204,13 @@ void GPU::draw_vtx_array(bool is_indexed)
         }
         else
             index = i + ctx.vtx_offset;
+
+        uint32_t slot = index % VTX_CACHE_SIZE;
+        if (use_cache && vtx_cache_tag[slot] == index)
+        {
+            submit_vtx(vtx_cache[slot], false);
+            continue;
+        }
 
         //Initialize variable input attributes
         {
@@ -1290,7 +1305,15 @@ void GPU::draw_vtx_array(bool is_indexed)
         }
         }
 
-        input_vsh_vtx();
+        if (use_cache)
+        {
+            exec_shader(ctx.vsh);
+            map_sh_output_to_vtx(ctx.vsh, vtx_cache[slot]);
+            vtx_cache_tag[slot] = index;
+            submit_vtx(vtx_cache[slot], false);
+        }
+        else
+            input_vsh_vtx();
     }
 }
 
