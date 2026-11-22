@@ -3,6 +3,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -151,6 +152,8 @@ struct VulkanRasterizer::Impl
     bool target_valid = false;
     std::vector<Target> parked;
     uint64_t target_creates = 0, target_reuses = 0;
+    //Time in vkQueueSubmit and in vkWaitForFences since the last stats() call, in ms
+    double t_submit = 0, t_fence = 0, t_copy_out = 0;
 
     Buffer vertex_ring, uniform_ring;
     std::vector<Buffer> staging;
@@ -762,8 +765,13 @@ void VulkanRasterizer::Impl::submit_and_wait()
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 2;
     si.pCommandBuffers = cmds;
+    auto t0 = std::chrono::steady_clock::now();
     check(vkQueueSubmit(queue, 1, &si, fence), "vkQueueSubmit");
+    auto t1 = std::chrono::steady_clock::now();
     check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    auto t2 = std::chrono::steady_clock::now();
+    t_submit += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    t_fence += std::chrono::duration<double, std::milli>(t2 - t1).count();
     vkResetFences(device, 1, &fence);
 
     //Everything recorded is done, so the per-submit allocators start over
@@ -1069,17 +1077,20 @@ bool VulkanRasterizer::depth_is_float() const
     return impl->depth_is_float;
 }
 
-std::string VulkanRasterizer::stats() const
+std::string VulkanRasterizer::stats()
 {
     VkDeviceSize staging_total = 0;
     for (auto& b : impl->staging)
         staging_total += b.size;
-    char buf[200];
-    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu readback %s targets %zu new %llu",
+    char buf[320];
+    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu readback %s targets %zu new %llu"
+             " | ms total since last: submit %.1f fence %.1f copy-out %.1f",
              impl->textures.size(), (unsigned long long)(impl->texture_bytes >> 20),
              (unsigned long long)(staging_total >> 20), impl->pipelines.size(),
              (unsigned long long)impl->serial, impl->readback.cached ? "cached" : "uncached",
-             impl->parked.size() + 1, (unsigned long long)impl->target_creates);
+             impl->parked.size() + 1, (unsigned long long)impl->target_creates, impl->t_submit, impl->t_fence,
+             impl->t_copy_out);
+    impl->t_submit = impl->t_fence = impl->t_copy_out = 0;
     return buf;
 }
 
@@ -1333,6 +1344,13 @@ void VulkanRasterizer::end(uint32_t* color, float* depth, uint8_t* stencil)
         r.size = VK_WHOLE_SIZE;
         vkInvalidateMappedMemoryRanges(d.device, 1, &r);
     }
+    auto copy_t0 = std::chrono::steady_clock::now();
+    struct CopyTimer
+    {
+        double& acc;
+        std::chrono::steady_clock::time_point t0;
+        ~CopyTimer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+    } copy_timer{d.t_copy_out, copy_t0};
     const uint8_t* p = d.readback.map;
     if (color)
         memcpy(color, p, n * 4);

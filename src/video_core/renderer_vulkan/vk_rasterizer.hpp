@@ -81,7 +81,7 @@ class VulkanRasterizer
         // The depth image is D32F (no D24S8 on this device): it keeps more precision than memory
         bool depth_is_float() const;
         //Cache sizes, for BLOSSOM_TRACE_GPU
-        std::string stats() const;
+        std::string stats(); //resets the timers it reports
 
         // Starts a session on a width x height target. color: RGBA8 (R in the low byte),
         // depth: 0..1, stencil: 8 bits; all row-major, top row first.
