@@ -33,6 +33,9 @@ enum Bucket
     JIT_CODE_CHECK,
     JIT_GLUE,
     JIT_COMPILE,
+    //Inside gpu-cmd: vertex attribute fetch, and primitive assembly/clipping/setup (raster excluded)
+    GPU_VTX_FETCH,
+    GPU_PRIM,
     //Inside "other": the emulator loop picking the next slice, and the emulation thread waiting
     //for the UI between frames (and handing it the frame)
     LOOP,

@@ -20,44 +20,67 @@ void Timers::reset()
 
 void Timers::run(int cycles11, int cycles9)
 {
+    //Ticks are applied in bulk: with a prescaler of 1 the old one-tick-per-iteration loops ran
+    //hundreds of times per slice for every enabled timer. Overflows still happen one at a time,
+    //in the same order.
     for (int i = 0; i < 4; i++)
     {
-        if (arm9_timers[i].enabled && !arm9_timers[i].countup)
+        Timer9& t = arm9_timers[i];
+        if (t.enabled && !t.countup)
         {
-            arm9_timers[i].clocks += cycles9;
-            while (arm9_timers[i].clocks >= arm9_timers[i].prescalar)
+            t.clocks += cycles9;
+            if (t.clocks < t.prescalar)
+                continue;
+            uint32_t ticks = t.clocks / t.prescalar;
+            t.clocks -= ticks * t.prescalar;
+            while (ticks)
             {
-                arm9_timers[i].counter++;
-                arm9_timers[i].clocks -= arm9_timers[i].prescalar;
-                if (arm9_timers[i].counter >= 0x10000)
+                uint32_t to_overflow = t.counter < 0x10000 ? 0x10000 - t.counter : 1;
+                if (ticks < to_overflow)
                 {
-                    handle_overflow(i);
+                    t.counter += ticks;
+                    break;
                 }
+                ticks -= to_overflow;
+                t.counter = 0x10000;
+                handle_overflow(i);
             }
         }
     }
     for (int i = 0; i < 8; i++)
     {
-        if (arm11_timers[i].enabled)
+        Timer11& t = arm11_timers[i];
+        if (t.enabled)
         {
-            arm11_timers[i].clocks += cycles11;
-            while (arm11_timers[i].enabled && arm11_timers[i].clocks >= arm11_timers[i].prescalar)
+            t.clocks += cycles11;
+            if (t.clocks < t.prescalar)
+                continue;
+            uint32_t ticks = t.clocks / t.prescalar;
+            t.clocks -= ticks * t.prescalar;
+            while (ticks)
             {
-                arm11_timers[i].counter--;
-                arm11_timers[i].clocks -= arm11_timers[i].prescalar;
-                if (arm11_timers[i].counter == 0)
+                if (!t.enabled)
                 {
-                    if (arm11_timers[i].auto_reload)
-                        arm11_timers[i].counter = arm11_timers[i].load;
-                    else
-                        arm11_timers[i].enabled = false;
-
-                    arm11_timers[i].int_flag = true;
-                    if (arm11_timers[i].int_enabled)
-                    {
-                        pmr->set_pending_irq(i & 0x3, 29 + (i / 4));
-                    }
+                    //Stopped at zero: the ticks it did not count stay in the prescaler, as before
+                    t.clocks += ticks * t.prescalar;
+                    break;
                 }
+                //Counting down from 0 wraps and needs 2^32 ticks to reach 0 again
+                if (t.counter == 0 || ticks < t.counter)
+                {
+                    t.counter -= ticks;
+                    break;
+                }
+                ticks -= t.counter;
+                t.counter = 0;
+                if (t.auto_reload)
+                    t.counter = t.load;
+                else
+                    t.enabled = false;
+
+                t.int_flag = true;
+                if (t.int_enabled)
+                    pmr->set_pending_irq(i & 0x3, 29 + (i / 4));
             }
         }
     }

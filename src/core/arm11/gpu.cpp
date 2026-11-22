@@ -1198,6 +1198,8 @@ void GPU::draw_vtx_array(bool is_indexed)
             index = i + ctx.vtx_offset;
 
         //Initialize variable input attributes
+        {
+        Profiler::Scope fetch_scope(Profiler::GPU_VTX_FETCH);
         int attr = 0;
         int buffer = 0;
         while (attr < ctx.total_vtx_attrs)
@@ -1285,6 +1287,7 @@ void GPU::draw_vtx_array(bool is_indexed)
             }
             else
                 attr++;
+        }
         }
 
         input_vsh_vtx();
@@ -1385,6 +1388,7 @@ void GPU::map_sh_output_to_vtx(ShaderUnit &sh, Vertex &v)
 
 void GPU::submit_vtx(Vertex& v, bool winding)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_PRIM);
     //Add vertex to the queue
     ctx.vertex_queue[ctx.submitted_vertices] = v;
     ctx.submitted_vertices++;
