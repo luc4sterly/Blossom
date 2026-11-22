@@ -100,6 +100,17 @@ struct GPU::HwRenderer
     std::vector<float> depth;
     std::vector<uint8_t> stencil;
     uint64_t sessions = 0, draws = 0;
+    //Texture hashes already computed in this session. Memory cannot change inside a session (the
+    //CPU does not run while a command list is processed, and render-to-texture ends the session
+    //first), so a texture used by hundreds of polygons is hashed once instead of once per polygon.
+    struct TexHash
+    {
+        uint32_t addr, len;
+        uint8_t type;
+        uint64_t hash;
+    };
+    std::vector<TexHash> tex_hashes;
+    uint64_t tex_hashed = 0, tex_hash_hits = 0;
 };
 
 const char* GPU::renderer_env()
@@ -203,6 +214,7 @@ void GPU::hw_end_session()
         return;
     Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     h.session = false;
+    h.tex_hashes.clear();
     h.vk->end(h.color_written ? h.color.data() : nullptr, h.depth_written ? h.depth.data() : nullptr,
               h.depth_written ? h.stencil.data() : nullptr);
 
@@ -374,9 +386,21 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
             continue;
         uint32_t w = ctx.tex_width[i], th = ctx.tex_height[i];
         uint32_t len = texture_bytes(ctx.tex_type[i], w, th);
-        uint8_t* p = e->phys_ptr(ctx.tex_addr[i], len);
-        uint64_t hash;
-        if (p)
+        uint64_t hash = 0;
+        bool cached = false;
+        for (const HwRenderer::TexHash& t : h.tex_hashes)
+        {
+            if (t.addr == ctx.tex_addr[i] && t.len == len && t.type == ctx.tex_type[i])
+            {
+                hash = t.hash;
+                cached = true;
+                break;
+            }
+        }
+        uint8_t* p = cached ? nullptr : e->phys_ptr(ctx.tex_addr[i], len);
+        if (cached)
+            h.tex_hash_hits++;
+        else if (p)
             hash = hash_bytes(p, len, ((uint64_t)ctx.tex_type[i] << 56) ^ ctx.tex_addr[i]);
         else
         {
@@ -384,6 +408,11 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
             for (uint32_t j = 0; j < len; j++)
                 tmp[j] = e->arm11_read8(0, ctx.tex_addr[i] + j);
             hash = hash_bytes(tmp.data(), len, ((uint64_t)ctx.tex_type[i] << 56) ^ ctx.tex_addr[i]);
+        }
+        if (!cached)
+        {
+            h.tex_hashed++;
+            h.tex_hashes.push_back({ctx.tex_addr[i], len, (uint8_t)ctx.tex_type[i], hash});
         }
         tex_ids[i] = h.vk->texture(hash, w, th, [&](uint32_t* out) {
             for (uint32_t v = 0; v < th; v++)
@@ -541,8 +570,9 @@ void GPU::hw_print_stats(int frame)
 {
     if (!hw)
         return;
-    fprintf(stderr, "[GPUTRACE] frame %d: vulkan sessions %llu draws %llu | %s\n", frame,
-            (unsigned long long)hw->sessions, (unsigned long long)hw->draws, hw->vk->stats().c_str());
+    fprintf(stderr, "[GPUTRACE] frame %d: vulkan sessions %llu draws %llu tex-hashed %llu tex-hash-hits %llu | %s\n",
+            frame, (unsigned long long)hw->sessions, (unsigned long long)hw->draws,
+            (unsigned long long)hw->tex_hashed, (unsigned long long)hw->tex_hash_hits, hw->vk->stats().c_str());
 }
 
 #else // !BLOSSOM_HAS_VULKAN
