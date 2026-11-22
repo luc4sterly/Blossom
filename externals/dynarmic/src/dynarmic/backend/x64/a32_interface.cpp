@@ -3,7 +3,10 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 
@@ -29,6 +32,31 @@
 #include "dynarmic/ir/opt/passes.h"
 
 namespace Dynarmic::A32 {
+
+void (*compile_hook)(bool entering) = nullptr;
+CompileProgress compile_progress;
+
+const char* CompileStageName(std::uint32_t stage) {
+    static const char* const names[] = {"idle", "translate", "polyfill", "naming", "get/set elim", "dead code",
+                                        "const prop", "identity removal", "verification", "emit"};
+    return stage < std::size(names) ? names[stage] : "?";
+}
+
+namespace {
+// BLOSSOM_JIT_DUMP=<lo>-<hi> (hex): print the IR of every block starting in that range after each
+// compile stage, so a compile that never ends shows the last stage it finished.
+struct DumpRange {
+    std::uint32_t lo = 1, hi = 0;
+    DumpRange() {
+        if (const char* env = std::getenv("BLOSSOM_JIT_DUMP")) {
+            char* end = nullptr;
+            lo = static_cast<std::uint32_t>(std::strtoul(env, &end, 16));
+            hi = (end && *end == '-') ? static_cast<std::uint32_t>(std::strtoul(end + 1, nullptr, 16)) : lo;
+        }
+    }
+};
+const DumpRange dump_range;
+}  // namespace
 
 using namespace Backend::X64;
 
@@ -226,6 +254,19 @@ private:
         if (block)
             return *block;
 
+        if (compile_hook)
+            compile_hook(true);
+        const std::uint32_t block_pc = A32::LocationDescriptor{descriptor}.PC();
+        const bool dump = block_pc >= dump_range.lo && block_pc <= dump_range.hi;
+        compile_progress.pc = block_pc;
+        compile_progress.ir_insts = 0;
+        compile_progress.stage = 1;
+        SCOPE_EXIT {
+            compile_progress.stage = 0;
+            if (compile_hook)
+                compile_hook(false);
+        };
+
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             invalidate_entire_cache = true;
@@ -233,21 +274,44 @@ private:
         }
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions});
+        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions, conf.interpret_lo, conf.interpret_hi});
+        auto stage_done = [&](std::uint32_t next_stage) {
+            compile_progress.ir_insts = static_cast<std::uint32_t>(ir_block.Instructions().size());
+            if (dump) {
+                std::fprintf(stderr, "[JIT DUMP] $%08X after %s (%u IR instructions):\n%s\n", block_pc,
+                             CompileStageName(compile_progress.stage), compile_progress.ir_insts, IR::DumpBlock(ir_block).c_str());
+                std::fflush(stderr);
+            }
+            compile_progress.stage = next_stage;
+        };
+        stage_done(2);
         Optimization::PolyfillPass(ir_block, polyfill_options);
+        stage_done(3);
         Optimization::NamingPass(ir_block);
         if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+            stage_done(4);
             Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true});
+            stage_done(5);
             Optimization::DeadCodeElimination(ir_block);
         }
         if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+            stage_done(6);
             Optimization::A32ConstantMemoryReads(ir_block, conf.callbacks);
             Optimization::ConstantPropagation(ir_block);
+            stage_done(5);
             Optimization::DeadCodeElimination(ir_block);
         }
+        stage_done(7);
         Optimization::IdentityRemovalPass(ir_block);
+        stage_done(8);
         Optimization::VerificationPass(ir_block);
-        return emitter.Emit(ir_block);
+        stage_done(9);
+        auto result = emitter.Emit(ir_block);
+        if (dump) {
+            std::fprintf(stderr, "[JIT DUMP] $%08X emitted, %zu bytes of host code\n", block_pc, result.size);
+            std::fflush(stderr);
+        }
+        return result;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {

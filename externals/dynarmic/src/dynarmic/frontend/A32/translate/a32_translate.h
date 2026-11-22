@@ -41,6 +41,10 @@ struct TranslationOptions {
 
     /// Blossom: stop a block after this many instructions (0 = no limit).
     size_t max_block_instructions = 0;
+
+    /// Blossom: instructions with PC in [interpret_lo, interpret_hi] go to the interpreter (hi = 0: off).
+    u32 interpret_lo = 0;
+    u32 interpret_hi = 0;
 };
 
 /**

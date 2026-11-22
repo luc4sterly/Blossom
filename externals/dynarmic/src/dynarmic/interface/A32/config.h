@@ -221,6 +221,12 @@ struct UserConfig {
     /// Blossom: maximum number of guest instructions per translated block (0 = no limit).
     std::size_t max_block_instructions = 0;
 
+    /// Blossom: never compile guest instructions with PC in [interpret_lo, interpret_hi]; each one
+    /// goes to InterpreterFallback instead (interpret_hi = 0 disables it). Workaround for blocks that
+    /// dynarmic fails to compile.
+    std::uint32_t interpret_lo = 0;
+    std::uint32_t interpret_hi = 0;
+
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define
     /// definite behaviour for some unpredictable instructions.

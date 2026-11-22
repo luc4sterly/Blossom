@@ -1,4 +1,5 @@
 #include <cstring>
+#include <cstdlib>
 #include <cstdio>
 #include <ctime>
 #include "core/arm11/mpcore_pmr.hpp"
@@ -178,10 +179,35 @@ void I2C::mcu_interrupt(int id)
 
 void I2C::update_time()
 {
+    // BLOSSOM_FIXED_RTC=1: start from a fixed date and advance one second
+    // every 60 calls (update_time runs once per emulated frame), so runs are
+    // reproducible regardless of the host clock.
+    static const bool fixed_rtc = [] {
+        const char* env = std::getenv("BLOSSOM_FIXED_RTC");
+        return env && env[0] && env[0] != '0';
+    }();
+    static uint64_t fixed_calls = 0;
+
     time_t raw_time;
     struct tm * time;
-    std::time(&raw_time);
-    time = std::localtime(&raw_time);
+    struct tm fixed_tm;
+    if (fixed_rtc)
+    {
+        uint64_t secs = fixed_calls++ / 60;
+        std::memset(&fixed_tm, 0, sizeof(fixed_tm));
+        fixed_tm.tm_year = 126; // 2026
+        fixed_tm.tm_mon = 0;
+        fixed_tm.tm_mday = 1;
+        fixed_tm.tm_hour = 12 + (int)((secs / 3600) % 12);
+        fixed_tm.tm_min = (int)((secs / 60) % 60);
+        fixed_tm.tm_sec = (int)(secs % 60);
+        time = &fixed_tm;
+    }
+    else
+    {
+        std::time(&raw_time);
+        time = std::localtime(&raw_time);
+    }
 
     mcu_time[0] = itob(time->tm_sec);
     mcu_time[1] = itob(time->tm_min);

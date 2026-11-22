@@ -50,7 +50,14 @@ struct less<Dynarmic::IR::LocationDescriptor> {
 template<>
 struct hash<Dynarmic::IR::LocationDescriptor> {
     size_t operator()(const Dynarmic::IR::LocationDescriptor& x) const noexcept {
-        return std::hash<u64>()(x.Value());
+        // Blossom: mix the bits (splitmix64 finalizer). std::hash<u64> is the identity on libstdc++, and
+        // tsl::robin_map's power-of-two policy indexes with the low bits, which are just the PC: the
+        // same PC in many contexts (every 3DS process has .text at $00100000) all landed in one bucket
+        // run, and rehash_on_extreme_load kept doubling patch_information until it took GBs.
+        u64 z = x.Value();
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return static_cast<size_t>(z ^ (z >> 31));
     }
 };
 }  // namespace std

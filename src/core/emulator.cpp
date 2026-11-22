@@ -1,4 +1,5 @@
 #include "common/profiler.hpp"
+#include "common/native_stack.hpp"
 #ifdef BLOSSOM_HAS_JIT
 #include <dynarmic/interface/exclusive_monitor.h>
 #endif
@@ -346,14 +347,28 @@ void Emulator::watchdog_loop()
         const char* env = getenv("BLOSSOM_MAX_RAM_MB");
         return env ? atol(env) : 4096L;
     }();
-    int64_t last_report = 0;
+    int64_t last_report = 0, last_growth_report = 0;
+    long mb_history[4] = {0, 0, 0, 0};
+    int tick = 0;
     while (!watchdog_stop)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         long mb = Profiler::resident_mb();
+        //Memory 1 s ago: a runaway grows by hundreds of MB a second, report it while it happens
+        long mb_1s_ago = mb_history[tick % 4];
+        mb_history[tick % 4] = mb;
+        tick++;
+        int64_t now_growth = now_ms();
+        if (tick > 4 && mb - mb_1s_ago > 150 && now_growth - last_growth_report > 1000)
+        {
+            watchdog_report("memory grew by more than 150 MB in the last second", mb);
+            NativeStack::report(3, 150);
+            last_growth_report = now_growth;
+        }
         if (max_mb > 0 && mb > max_mb)
         {
             watchdog_report("memory limit passed, stopping", mb);
+            NativeStack::report(2, 200);
             //Twice, a second apart, to show what keeps running
             std::this_thread::sleep_for(std::chrono::seconds(1));
             watchdog_report("memory limit passed, stopping", Profiler::resident_mb());
@@ -373,6 +388,7 @@ void Emulator::run()
 {
     Profiler::claim_thread();
     start_watchdog();
+    NativeStack::set_target_thread();
     i2c.update_time();
     printf("FRAME %d\n", frames);
 

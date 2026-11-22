@@ -37,6 +37,12 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
             break;
         }
 
+        if (options.interpret_hi != 0 && arm_pc >= options.interpret_lo && arm_pc <= options.interpret_hi) {
+            // Blossom: this range is never compiled; the interpreter runs it one instruction at a time
+            should_continue = visitor.InterpretThisInstruction();
+            break;
+        }
+
         if (const auto arm_instruction = tcb->MemoryReadCode(arm_pc)) {
             visitor.current_instruction_size = 4;
 

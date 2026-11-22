@@ -161,7 +161,7 @@ struct less<Dynarmic::A32::LocationDescriptor> {
 template<>
 struct hash<Dynarmic::A32::LocationDescriptor> {
     size_t operator()(const Dynarmic::A32::LocationDescriptor& x) const noexcept {
-        return std::hash<u64>()(x.UniqueHash());
+        return std::hash<Dynarmic::IR::LocationDescriptor>()(Dynarmic::IR::LocationDescriptor{x.UniqueHash()});
     }
 };
 }  // namespace std

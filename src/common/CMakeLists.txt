@@ -6,6 +6,8 @@ add_library(blossom_common STATIC
     exceptions.hpp
     log.cpp
     log.hpp
+    native_stack.cpp
+    native_stack.hpp
     profiler.cpp
     profiler.hpp
     rotr.cpp

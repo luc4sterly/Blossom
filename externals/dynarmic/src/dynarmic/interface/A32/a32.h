@@ -17,6 +17,21 @@
 namespace Dynarmic {
 namespace A32 {
 
+/// Blossom: called with true before and false after dynarmic translates and compiles a block
+/// (profiling only; null by default).
+extern void (*compile_hook)(bool entering);
+
+/// Blossom: the compile in flight, for a watchdog thread to read (racy, debugging only).
+/// stage: 0 idle, 1 translate, 2 polyfill, 3 naming, 4 get/set elim, 5 dead code, 6 const prop,
+/// 7 identity removal, 8 verification, 9 emit.
+struct CompileProgress {
+    volatile std::uint32_t pc = 0;
+    volatile std::uint32_t stage = 0;
+    volatile std::uint32_t ir_insts = 0;
+};
+extern CompileProgress compile_progress;
+const char* CompileStageName(std::uint32_t stage);
+
 class Jit final {
 public:
     explicit Jit(UserConfig conf);

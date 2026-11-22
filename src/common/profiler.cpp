@@ -21,7 +21,7 @@
 namespace Profiler
 {
 
-//Resident memory of the process in MB, or -1 if unknown
+//Committed private memory in MB on Windows, -1 elsewhere
 long private_mb()
 {
 #ifdef _WIN32
@@ -37,9 +37,11 @@ long private_mb()
 long resident_mb()
 {
 #ifdef _WIN32
-    PROCESS_MEMORY_COUNTERS pmc;
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
-        return (long)(pmc.WorkingSetSize >> 20);
+    //Private bytes (committed memory): the working set can stay small while Windows pages the
+    //process out, so it missed a leak that grew to GBs
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+        return (long)(pmc.PrivateUsage >> 20);
     return -1;
 #else
     long pages = 0, resident = 0;
@@ -92,13 +94,13 @@ const char* counter_names[COUNTER_COUNT] =
 {
     "jit-icache-invals", "jit-range-invals", "jit-fallbacks", "jit-new-contexts",
     "jit-translated-instrs", "jit-slow-reads", "jit-slow-writes", "jit-changed-chunks",
-    "slices", "short-slices"
+    "slices", "jit-compiles", "short-slices"
 };
 
 const char* names[BUCKET_COUNT] =
 {
     "other", "arm11", "arm9", "gpu-cmd", "gpu-xfer", "gpu-fill", "gpu-disp", "gpu-vsh", "gpu-raster", "dsp", "wifi", "dma+timers", "events",
-    "jit-mem", "jit-interp", "jit-codecheck", "jit-glue", "loop", "frontend", "report"
+    "jit-mem", "jit-interp", "jit-codecheck", "jit-glue", "jit-compile", "loop", "frontend", "report"
 };
 
 //Time spent with no bucket open ("other"), split by the bucket that was left last and the one

@@ -84,8 +84,23 @@ class ThreadIdCoprocessor final : public A32::Coprocessor
 
 }
 
+//dynarmic's translation and compilation, as its own profiler bucket. Always counted, so that the
+//watchdog can tell a compile storm from code that is already compiled.
+static void compile_hook(bool entering)
+{
+    if (entering)
+    {
+        Profiler::counters[Profiler::JIT_COMPILES]++;
+        if (Profiler::enabled)
+            Profiler::enter(Profiler::JIT_COMPILE);
+    }
+    else if (Profiler::enabled)
+        Profiler::leave();
+}
+
 ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
 {
+    A32::compile_hook = compile_hook;
     page_table = std::make_unique<JitPageTable>();
     cpu.cp15->set_jit_page_table(page_table.get());
 
@@ -144,6 +159,26 @@ ARM_JIT::ARM_JIT(ARM_CPU& cpu, Dynarmic::ExclusiveMonitor* monitor) : cpu(cpu)
     //on the PC test (ARM11 core 1 returning through POP {..., PC} in user code), and that went away
     //with only this bit cleared. Root cause unknown; the measured cost is about 2%.
     conf.optimizations &= ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
+
+    //BLOSSOM_JIT_INTERP=<lo>-<hi> (hex, ARM11 only): run guest code in that range through the
+    //interpreter instead of compiling it (debug aid, off by default). Each instruction there still
+    //costs a dynarmic dispatch and an empty block, so it is slow.
+    if (!is_arm9)
+    {
+        uint32_t lo = 0, hi = 0;
+        if (const char* env = getenv("BLOSSOM_JIT_INTERP"))
+        {
+            char* end = nullptr;
+            lo = (uint32_t)strtoul(env, &end, 16);
+            hi = (end && *end == '-') ? (uint32_t)strtoul(end + 1, nullptr, 16) : lo;
+            if (lo == 0 && hi == 0)
+                fprintf(stderr, "[ARM%d] JIT: interpreter range off\n", cpu.id);
+            else
+                fprintf(stderr, "[ARM%d] JIT: interpreting $%08X-$%08X\n", cpu.id, lo, hi);
+        }
+        conf.interpret_lo = lo;
+        conf.interpret_hi = hi;
+    }
 
     //BLOSSOM_JIT_OPT=<mask>: dynarmic optimizations to keep (OptimizationFlag bits: 1 block
     //linking, 2 return stack buffer, 4 fast dispatch, 8 get/set elimination, 16 constant
@@ -702,7 +737,23 @@ void ARM_JIT::InterpreterFallback(A32::VAddr pc, std::size_t num_instructions)
         sync_vfp_from_jit();
 
         cpu.in_jit = false;
+        //The interpreter runs a Thumb BL/BLX as two halves. If only the first one ran here, dynarmic
+        //would start its next block at the second half and decode it as the start of a 32-bit
+        //instruction: run both halves together.
+        bool bl_prefix = false;
+        if (cpu.get_CPSR()->thumb)
+        {
+            uint64_t mem = (uint64_t)cpu.tlb_map[pc >> 12];
+            if ((mem & TLB_READ) && !(mem & TLB_MMIO))
+            {
+                uint16_t instr;
+                std::memcpy(&instr, (const uint8_t*)(mem & ~TLB_FLAGS) + (pc & 0xFFF), 2);
+                bl_prefix = (instr & 0xF800) == 0xF000;
+            }
+        }
         cpu.interpret_one();
+        if (bl_prefix && !cpu.halted && cpu.get_CPSR()->thumb && cpu.get_PC() == pc + 4)
+            cpu.interpret_one();
         cpu.in_jit = true;
 
         sync_vfp_to_jit();
@@ -731,6 +782,9 @@ void ARM_JIT::debug_report()
             "r2 $%08X r3 $%08X r12 $%08X sp $%08X lr $%08X | contexts %zu code pages %zu\n",
             cpu.id, r[15], cpsr, cpu.in_jit ? "in Run" : "outside Run", cpu.cycles_ran, cycle_target,
             context, r[0], r[1], r[2], r[3], r[12], r[13], r[14], context_ids.size(), code_chunks.size());
+    if (uint32_t stage = A32::compile_progress.stage)
+        fprintf(stderr, "[WATCHDOG] dynarmic compiling block $%08X, stage %s, %u IR instructions so far\n",
+                A32::compile_progress.pc, A32::CompileStageName(stage), A32::compile_progress.ir_insts);
     int step = thumb ? 2 : 4;
     for (int i = -4; i <= 3; i++)
     {
