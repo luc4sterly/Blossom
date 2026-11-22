@@ -121,6 +121,8 @@ void GPU::reset(uint8_t* vram)
 
     lcd_initialized = false;
     memset(&stats, 0, sizeof(stats));
+    shader_reset_decode(ctx.vsh);
+    shader_reset_decode(ctx.gsh);
 
     framebuffers[0].left_addr_a = 0x18000000;
     framebuffers[1].left_addr_a = 0x18000000;
@@ -664,39 +666,51 @@ void GPU::do_command_engine_dma(uint64_t index)
 void GPU::do_memfill(int index)
 {
     Profiler::Scope prof_scope(Profiler::GPU_MEMFILL);
-    hw_sync();
-    //TODO: Is the end region inclusive or exclusive? This code assumes exclusive
-    printf("[GPU] Do memfill%d\n", index);
-    printf("Start: $%08X End: $%08X Value: $%08X Width: %d\n",
-           memfill[index].start, memfill[index].end, memfill[index].value, memfill[index].fill_width);
-    for (uint32_t i = memfill[index].start; i < memfill[index].end; i++)
+    MemoryFill fill = memfill[index];
+    if (fill.fill_width > 2)
+        EmuException::die("[GPU] Unrecognized Memory Fill format %d\n", fill.fill_width);
+    if (trace_commands())
+        printf("[GPU] Memfill%d start $%08X end $%08X value $%08X width %d\n", index, fill.start, fill.end,
+               fill.value, fill.fill_width);
+
+    //Like display transfers, a fill queues behind an in-flight Vulkan writeback instead of waiting
+    if (!hw_defer([this, fill] { run_memfill(fill); }))
     {
-        switch (memfill[index].fill_width)
-        {
-            case 0:
-                write_vram<uint16_t>(i, memfill[index].value & 0xFFFF);
-                i++;
-                break;
-            case 1:
-                write_vram<uint8_t>(i, memfill[index].value & 0xFF);
-                write_vram<uint8_t>(i + 1, (memfill[index].value >> 8) & 0xFF);
-                write_vram<uint8_t>(i + 2, (memfill[index].value >> 16) & 0xFF);
-                i += 2;
-                break;
-            case 2:
-                write_vram<uint32_t>(i, memfill[index].value);
-                i += 3;
-                break;
-            default:
-                EmuException::die("[GPU] Unrecognized Memory Fill format %d\n", memfill[index].fill_width);
-        }
+        hw_sync();
+        run_memfill(fill);
     }
+
     memfill[index].finished = true;
     memfill[index].busy = false;
     stats.memfill[index & 1]++;
 
     //Memfill complete interrupt
     pmr->assert_hw_irq(0x28 + index);
+}
+
+void GPU::run_memfill(MemoryFill fill)
+{
+    //TODO: Is the end region inclusive or exclusive? This code assumes exclusive
+    const uint32_t v = fill.value;
+    switch (fill.fill_width)
+    {
+        case 0:
+            for (uint32_t i = fill.start; i < fill.end; i += 2)
+                write_vram<uint16_t>(i, v & 0xFFFF);
+            break;
+        case 1:
+            for (uint32_t i = fill.start; i < fill.end; i += 3)
+            {
+                write_vram<uint8_t>(i, v & 0xFF);
+                write_vram<uint8_t>(i + 1, (v >> 8) & 0xFF);
+                write_vram<uint8_t>(i + 2, (v >> 16) & 0xFF);
+            }
+            break;
+        case 2:
+            for (uint32_t i = fill.start; i < fill.end; i += 4)
+                write_vram<uint32_t>(i, v);
+            break;
+    }
 }
 
 void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
@@ -845,16 +859,14 @@ void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
     //Geometry Shader code upload
     if (reg >= 0x29C && reg < 0x2A4)
     {
-        *(uint32_t*)&ctx.gsh.code[ctx.gsh.code_index] = param;
-        ctx.gsh.code_index += 4;
+        shader_upload_code(ctx.gsh, param);
         return;
     }
 
     //Geometry Shader operand descriptor upload
     if (reg >= 0x2A6 && reg < 0x2AE)
     {
-        ctx.gsh.op_desc[ctx.gsh.op_desc_index] = param;
-        ctx.gsh.op_desc_index++;
+        shader_upload_desc(ctx.gsh, param);
         return;
     }
 
@@ -868,16 +880,14 @@ void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
     //Vertex Shader code upload
     if (reg >= 0x2CC && reg < 0x2D4)
     {
-        *(uint32_t*)&ctx.vsh.code[ctx.vsh.code_index] = param;
-        ctx.vsh.code_index += 4;
+        shader_upload_code(ctx.vsh, param);
         return;
     }
 
     //Vertex Shader operand descriptor upload
     if (reg >= 0x2D6 && reg < 0x2DE)
     {
-        ctx.vsh.op_desc[ctx.vsh.op_desc_index] = param;
-        ctx.vsh.op_desc_index++;
+        shader_upload_desc(ctx.vsh, param);
         return;
     }
 
@@ -1234,23 +1244,25 @@ void GPU::input_float_uniform(ShaderUnit &sh, uint32_t param)
             || (!sh.float_uniform_mode && sh.float_uniform_counter == 3))
     {
         int index = sh.float_uniform_index;
-        if (sh.float_uniform_mode)
+        if (index >= 96)
+            ; //Out of range uploads are dropped
+        else if (sh.float_uniform_mode)
         {
             //Float32
             for (int i = 0; i < 4; i++)
-                sh.float_uniform[index][3 - i] = float24::FromFloat32(std::bit_cast<float>(sh.float_uniform_buffer[i]));
+                sh.regs[0x20 + index][3 - i] = float24::FromFloat32(std::bit_cast<float>(sh.float_uniform_buffer[i]));
         }
         else
         {
             //Float24
-            sh.float_uniform[index].w = float24::FromRaw(sh.float_uniform_buffer[0] >> 8);
-            sh.float_uniform[index].z = float24::FromRaw((
+            sh.regs[0x20 + index].w = float24::FromRaw(sh.float_uniform_buffer[0] >> 8);
+            sh.regs[0x20 + index].z = float24::FromRaw((
                                                        (sh.float_uniform_buffer[0] & 0xFF) << 16) |
                                                        ((sh.float_uniform_buffer[1] >> 16) & 0xFFFF));
-            sh.float_uniform[index].y = float24::FromRaw((
+            sh.regs[0x20 + index].y = float24::FromRaw((
                                                        (sh.float_uniform_buffer[1] & 0xFFFF) << 8) |
                                                        ((sh.float_uniform_buffer[2] >> 24) & 0xFF));
-            sh.float_uniform[index].x = float24::FromRaw(sh.float_uniform_buffer[2] & 0xFFFFFF);
+            sh.regs[0x20 + index].x = float24::FromRaw(sh.float_uniform_buffer[2] & 0xFFFFFF);
         }
 
         sh.float_uniform_index++;
@@ -3264,193 +3276,176 @@ void GPU::update_stencil(uint32_t addr, uint8_t old, uint8_t ref, uint8_t func)
         e->arm11_write8(0, addr + 3, (new_stencil & ctx.stencil_write_mask) | (old & ~ctx.stencil_write_mask));
 }
 
-void GPU::exec_shader(ShaderUnit& sh)
+void GPU::exec_shader_legacy(ShaderUnit& sh)
 {
-    Profiler::Scope prof_scope(Profiler::GPU_SHADER);
     //Prepare input registers
     for (int i = 0; i < sh.total_inputs; i++)
     {
         int mapping = sh.input_mapping[i];
-        sh.input_regs[mapping] = sh.input_attrs[i];
+        sh.regs[mapping] = sh.input_attrs[i];
     }
-
-    /*for (int i = 0; i < sh.total_inputs; i++)
-    {
-        printf("v%d: ", i);
-        for (int j = 0; j < 4; j++)
-            printf("%f ", sh.input_regs[i][j].ToFloat32());
-        printf("\n");
-    }*/
-
-    /*for (int i = 0; i < 96; i++)
-    {
-        printf("c%d: ", i);
-        for (int j = 0; j < 4; j++)
-            printf("%f ", sh.float_uniform[i][j].ToFloat32());
-        printf("\n");
-    }*/
 
     sh.loop_ptr = 0;
     sh.call_ptr = 0;
     sh.if_ptr = 0;
     sh.pc = sh.entry_point * 4;
-    if (&sh == &ctx.vsh)
-        stats.vsh_runs++;
 
-    bool ended = false;
-    while (!ended)
+    while (true)
     {
-        stats.vsh_instrs++;
-        uint32_t instr = *(uint32_t*)&sh.code[sh.pc];
-        //printf("[GPU] [$%04X] $%08X\n", sh.pc, instr);
+        if (&sh == &ctx.vsh)
+            stats.vsh_instrs++;
+        uint32_t instr = *(uint32_t*)&sh.code[sh.pc & 0x3FFC];
         sh.pc += 4;
+        if (exec_shader_instr(sh, instr))
+            break;
+        shader_flow_post(sh);
+    }
+}
 
-        switch (instr >> 26)
+//Executes one instruction with the original per-opcode handlers. Returns true on END.
+bool GPU::exec_shader_instr(ShaderUnit& sh, uint32_t instr)
+{
+    switch (instr >> 26)
+    {
+        case 0x00:
+            shader_add(sh, instr);
+            break;
+        case 0x01:
+            shader_dp3(sh, instr);
+            break;
+        case 0x02:
+            shader_dp4(sh, instr);
+            break;
+        case 0x03:
+            shader_dph(sh, instr);
+            break;
+        case 0x08:
+            shader_mul(sh, instr);
+            break;
+        case 0x0C:
+            shader_max(sh, instr);
+            break;
+        case 0x0E:
+            shader_rcp(sh, instr);
+            break;
+        case 0x0F:
+            shader_rsq(sh, instr);
+            break;
+        case 0x12:
+            shader_mova(sh, instr);
+            break;
+        case 0x13:
+            shader_mov(sh, instr);
+            break;
+        case 0x1B:
+            shader_slti(sh, instr);
+            break;
+        case 0x20:
+            shader_break(sh, instr);
+            break;
+        case 0x21:
+            //NOP
+            break;
+        case 0x22:
+            return true;
+        case 0x23:
+            shader_breakc(sh, instr);
+            break;
+        case 0x24:
+            shader_call(sh, instr);
+            break;
+        case 0x25:
+            shader_callc(sh, instr);
+            break;
+        case 0x26:
+            shader_callu(sh, instr);
+            break;
+        case 0x27:
+            shader_ifu(sh, instr);
+            break;
+        case 0x28:
+            shader_ifc(sh, instr);
+            break;
+        case 0x29:
+            shader_loop(sh, instr);
+            break;
+        case 0x2A:
+            shader_emit(sh, instr);
+            break;
+        case 0x2B:
+            shader_setemit(sh, instr);
+            break;
+        case 0x2C:
+            shader_jmpc(sh, instr);
+            break;
+        case 0x2D:
+            shader_jmpu(sh, instr);
+            break;
+        case 0x2E:
+        case 0x2F:
+            shader_cmp(sh, instr);
+            break;
+        case 0x30:
+        case 0x31:
+        case 0x32:
+        case 0x33:
+        case 0x34:
+        case 0x35:
+        case 0x36:
+        case 0x37:
+            shader_madi(sh, instr);
+            break;
+        case 0x38:
+        case 0x39:
+        case 0x3A:
+        case 0x3B:
+        case 0x3C:
+        case 0x3D:
+        case 0x3E:
+        case 0x3F:
+            shader_mad(sh, instr);
+            break;
+        default:
+            EmuException::die("[GPU] Unrecognized shader opcode $%02X (instr:$%08X pc:$%04X)",
+                              instr >> 26, instr, sh.pc - 4);
+    }
+    return false;
+}
+
+//LOOP/IF/CALL bookkeeping after each instruction
+void GPU::shader_flow_post(ShaderUnit& sh)
+{
+    if (sh.loop_ptr > 0)
+    {
+        //Note: LOOP is inclusive, so this is actually checking if the PC is DST + 4
+        if (sh.pc == sh.loop_cmp_stack[sh.loop_ptr - 1])
         {
-            case 0x00:
-                shader_add(sh, instr);
-                break;
-            case 0x01:
-                shader_dp3(sh, instr);
-                break;
-            case 0x02:
-                shader_dp4(sh, instr);
-                break;
-            case 0x03:
-                shader_dph(sh, instr);
-                break;
-            case 0x08:
-                shader_mul(sh, instr);
-                break;
-            case 0x0C:
-                shader_max(sh, instr);
-                break;
-            case 0x0E:
-                shader_rcp(sh, instr);
-                break;
-            case 0x0F:
-                shader_rsq(sh, instr);
-                break;
-            case 0x12:
-                shader_mova(sh, instr);
-                break;
-            case 0x13:
-                shader_mov(sh, instr);
-                break;
-            case 0x1B:
-                shader_slti(sh, instr);
-                break;
-            case 0x20:
-                shader_break(sh, instr);
-                break;
-            case 0x21:
-                //NOP
-                break;
-            case 0x22:
-                ended = true;
-                break;
-            case 0x23:
-                shader_breakc(sh, instr);
-                break;
-            case 0x24:
-                shader_call(sh, instr);
-                break;
-            case 0x25:
-                shader_callc(sh, instr);
-                break;
-            case 0x26:
-                shader_callu(sh, instr);
-                break;
-            case 0x27:
-                shader_ifu(sh, instr);
-                break;
-            case 0x28:
-                shader_ifc(sh, instr);
-                break;
-            case 0x29:
-                shader_loop(sh, instr);
-                break;
-            case 0x2A:
-                shader_emit(sh, instr);
-                break;
-            case 0x2B:
-                shader_setemit(sh, instr);
-                break;
-            case 0x2C:
-                shader_jmpc(sh, instr);
-                break;
-            case 0x2D:
-                shader_jmpu(sh, instr);
-                break;
-            case 0x2E:
-            case 0x2F:
-                shader_cmp(sh, instr);
-                break;
-            case 0x30:
-            case 0x31:
-            case 0x32:
-            case 0x33:
-            case 0x34:
-            case 0x35:
-            case 0x36:
-            case 0x37:
-                shader_madi(sh, instr);
-                break;
-            case 0x38:
-            case 0x39:
-            case 0x3A:
-            case 0x3B:
-            case 0x3C:
-            case 0x3D:
-            case 0x3E:
-            case 0x3F:
-                shader_mad(sh, instr);
-                break;
-            default:
-                EmuException::die("[GPU] Unrecognized shader opcode $%02X (instr:$%08X pc:$%04X)",
-                                  instr >> 26, instr, sh.pc - 4);
-        }
+            sh.pc = sh.loop_stack[sh.loop_ptr - 1];
+            sh.loop_iter_stack[sh.loop_ptr - 1]--;
+            sh.loop_ctr_reg += sh.loop_inc_reg[sh.loop_ptr - 1];
 
-        if (sh.loop_ptr > 0)
-        {
-            //Note: LOOP is inclusive, so this is actually checking if the PC is DST + 4
-            if (sh.pc == sh.loop_cmp_stack[sh.loop_ptr - 1])
-            {
-                sh.pc = sh.loop_stack[sh.loop_ptr - 1];
-                sh.loop_iter_stack[sh.loop_ptr - 1]--;
-                sh.loop_ctr_reg += sh.loop_inc_reg[sh.loop_ptr - 1];
-
-                if (!sh.loop_iter_stack[sh.loop_ptr - 1])
-                    sh.loop_ptr--;
-            }
-        }
-
-        if (sh.if_ptr > 0)
-        {
-            if (sh.pc == sh.if_cmp_stack[sh.if_ptr - 1])
-            {
-                sh.if_ptr--;
-                sh.pc = sh.if_stack[sh.if_ptr];
-            }
-        }
-
-        if (sh.call_ptr > 0)
-        {
-            if (sh.pc == sh.call_cmp_stack[sh.call_ptr - 1])
-            {
-                sh.call_ptr--;
-                sh.pc = sh.call_stack[sh.call_ptr];
-            }
+            if (!sh.loop_iter_stack[sh.loop_ptr - 1])
+                sh.loop_ptr--;
         }
     }
 
-    /*for (int i = 0; i < 7; i++)
+    if (sh.if_ptr > 0)
     {
-        printf("o%d: ", i);
-        for (int j = 0; j < 4; j++)
-            printf("%f ", sh.output_regs[i][j].ToFloat32());
-        printf("\n");
-    }*/
+        if (sh.pc == sh.if_cmp_stack[sh.if_ptr - 1])
+        {
+            sh.if_ptr--;
+            sh.pc = sh.if_stack[sh.if_ptr];
+        }
+    }
+
+    if (sh.call_ptr > 0)
+    {
+        if (sh.pc == sh.call_cmp_stack[sh.call_ptr - 1])
+        {
+            sh.call_ptr--;
+            sh.pc = sh.call_stack[sh.call_ptr];
+        }
+    }
 }
 
 Vec4<float24> GPU::swizzle_sh_src(Vec4<float24> src, uint32_t op_desc, int src_type)
@@ -3492,11 +3487,9 @@ Vec4<float24> GPU::swizzle_sh_src(Vec4<float24> src, uint32_t op_desc, int src_t
 
 Vec4<float24> GPU::get_src(ShaderUnit& sh, uint8_t src)
 {
-    if (src < 0x10)
-        return sh.input_regs[src];
-    if (src < 0x20)
-        return sh.temp_regs[src - 0x10];
-    return sh.float_uniform[src - 0x20];
+    if (src < 0x80)
+        return sh.regs[src];
+    return Vec4<float24>::AssignToAll(float24::Zero()); //indexed past the last uniform
 }
 
 int GPU::get_idx1(ShaderUnit& sh, uint8_t idx1, uint8_t src1)
@@ -3526,7 +3519,7 @@ void GPU::set_sh_dest(ShaderUnit &sh, uint8_t dst, float24 value, int index)
     if (dst < 0x7)
         sh.output_regs[dst][index] = value;
     else if (dst >= 0x10 && dst < 0x20)
-        sh.temp_regs[dst - 0x10][index] = value;
+        sh.regs[dst][index] = value;
     else
         EmuException::die("[GPU] Unrecognized dst $%02X in set_sh_dest", dst);
 }

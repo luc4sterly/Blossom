@@ -7,6 +7,7 @@ add_library(blossom_core STATIC
     arm11/gpu.cpp
     arm11/gpu.hpp
     arm11/gpu_hw.cpp
+    arm11/gpu_shader.cpp
     arm11/gpu_floats.hpp
     arm11/hash.cpp
     arm11/hash.hpp

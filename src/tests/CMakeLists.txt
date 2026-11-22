@@ -66,3 +66,9 @@ if (ENABLE_VULKAN)
     add_test(NAME gpu-vulkan-matches-software COMMAND blossom-gpu-tests)
     set_tests_properties(gpu-vulkan-matches-software PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
+
+# Pre-decoded shader interpreter vs the original one on random vertex programs
+add_executable(blossom-shader-tests shader_test.cpp)
+target_link_libraries(blossom-shader-tests PRIVATE blossom_core blossom_warnings)
+add_test(NAME shader-fast-matches-legacy COMMAND blossom-shader-tests)
+set_tests_properties(shader-fast-matches-legacy PROPERTIES TIMEOUT 120)
