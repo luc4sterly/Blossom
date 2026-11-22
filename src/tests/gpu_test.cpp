@@ -2,6 +2,7 @@
 // Each scenario sets PICA registers, draws random clipped triangles with both renderers on the
 // same starting memory, and compares the color / depth / stencil buffers they leave in VRAM.
 // Needs a Vulkan device (lavapipe works). Exit code 77 = skipped (no Vulkan).
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -224,10 +225,72 @@ void write_ppm(const char* path, const std::vector<uint8_t>& color)
     fclose(f);
 }
 
+
+//--bench: a menu-like load (400x240 target, textured small quads, 4 command lists a frame) to
+//time the CPU side of the Vulkan path. Not part of the comparison.
+int bench(Emulator& e, const char* renderer, int frames)
+{
+    GPU& g = e.gpu_for_tests();
+    if (!g.set_renderer(renderer))
+        return 77;
+    const int BW = 400, BH = 240;
+    uint8_t* vram = e.phys_ptr(0x18000000, 0x300000);
+    for (uint32_t i = 0; i < 0x300000; i++)
+        vram[i] = rnd() & 0xFF;
+    common_setup(g, 0);
+    g.test_write_reg(0x041, f24(BW / 2.0f));
+    g.test_write_reg(0x043, f24(BH / 2.0f));
+    g.test_write_reg(0x11E, BW | ((BH - 1) << 12));
+    g.test_write_reg(0x080, 1);
+    texture_regs(g, 0, TEX0, 256, 256, 0, 2, 2);
+    tev_stage(g, 0, 0x30 | (0x30 << 16), 0, 1 | (1 << 16), 0, 0);
+    g.test_write_reg(0x100, 0x100);
+    g.test_write_reg(0x101, 0 | (0 << 8) | (6 << 16) | (7 << 20));
+    auto t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < frames; f++)
+    {
+        for (int list = 0; list < 4; list++)
+        {
+            for (int q = 0; q < 1000; q++)
+            {
+                float x = frand(-1.0f, 0.9f), y = frand(-1.0f, 0.9f), s = 0.08f;
+                Vertex v[3];
+                for (int k = 0; k < 3; k++)
+                {
+                    v[k] = random_vertex(false, 0, 1);
+                    v[k].pos[2] = float24::FromFloat32(-0.5f);
+                }
+                v[0].pos[0] = float24::FromFloat32(x); v[0].pos[1] = float24::FromFloat32(y);
+                v[1].pos[0] = float24::FromFloat32(x + s); v[1].pos[1] = float24::FromFloat32(y);
+                v[2].pos[0] = float24::FromFloat32(x); v[2].pos[1] = float24::FromFloat32(y + s);
+                g.test_triangle(v[0], v[1], v[2]);
+            }
+            g.test_end_list();
+        }
+    }
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (frames == 60)
+        g.print_debug_stats(60); //with BLOSSOM_TRACE_GPU=1: the per-phase times
+    printf("[bench] %s: %.2f ms per frame (4 lists x 1000 textured triangles, 400x240)\n", renderer, ms / frames);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--bench"))
+    {
+        Emulator e;
+        e.reset();
+        int frames = argc > 2 ? atoi(argv[2]) : 20;
+        int r = bench(e, "vulkan", frames);
+        if (argc > 3)
+            bench(e, "software", frames);
+        e.gpu_for_tests().set_renderer("software");
+        return r;
+    }
+
     const char* dump_dir = argc > 1 ? argv[1] : nullptr;
     Emulator e;
     e.reset();

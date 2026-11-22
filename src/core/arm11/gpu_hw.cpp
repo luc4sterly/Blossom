@@ -6,6 +6,7 @@
 // buffers it targets, and the end of the list (or a change of target, or a texture read from the
 // target) writes them back in the PICA's tiled formats.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,21 @@ uint64_t hash_bytes(const uint8_t* p, size_t n, uint64_t seed)
 {
     uint64_t h = seed ^ (n * 0x9E3779B97F4A7C15ULL);
     size_t i = 0;
+    //Four independent lanes, 32 bytes a step: textures are hashed often, and one dependent
+    //multiply chain was limited by its latency
+    uint64_t lane[4] = {h, h ^ 0x165667B19E3779F9ULL, h ^ 0x27D4EB2F165667C5ULL, h ^ 0x85EBCA77C2B2AE63ULL};
+    for (; i + 32 <= n; i += 32)
+    {
+        for (int k = 0; k < 4; k++)
+        {
+            uint64_t w;
+            memcpy(&w, p + i + 8 * k, 8);
+            lane[k] ^= w * 0xC2B2AE3D27D4EB4FULL;
+            lane[k] = ((lane[k] << 31) | (lane[k] >> 33)) * 0x9E3779B97F4A7C15ULL;
+        }
+    }
+    for (int k = 0; k < 4; k++)
+        h = (h ^ lane[k]) * 0x9E3779B97F4A7C15ULL + (uint64_t)k;
     for (; i + 8 <= n; i += 8)
     {
         uint64_t w;
@@ -111,7 +127,62 @@ struct GPU::HwRenderer
     };
     std::vector<TexHash> tex_hashes;
     uint64_t tex_hashed = 0, tex_hash_hits = 0;
+    //With BLOSSOM_TRACE_GPU: where gpu-raster goes, in ms since the last report
+    bool timing = false;
+    double t_poly = 0, t_begin = 0, t_hash = 0, t_wait = 0, t_writeback = 0;
+    uint64_t hashed_bytes = 0, pixels = 0;
 };
+
+namespace {
+
+//Adds the time until it goes out of scope to acc, when on
+struct HwTimer
+{
+    double* acc;
+    std::chrono::steady_clock::time_point t0;
+    explicit HwTimer(bool on, double& a) : acc(on ? &a : nullptr)
+    {
+        if (acc)
+            t0 = std::chrono::steady_clock::now();
+    }
+    ~HwTimer()
+    {
+        if (acc)
+            *acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    }
+};
+
+//GPU::get_swizzled_tile_addr, inlined: 8x8 tiles, Morton order inside a tile
+inline uint32_t tile_addr(uint32_t base, uint32_t width, uint32_t x, uint32_t y, uint32_t size)
+{
+    static constexpr uint8_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+    static constexpr uint8_t ylut[8] = {0x00, 0x02, 0x08, 0x0a, 0x20, 0x22, 0x28, 0x2a};
+    uint32_t offs = ((x & ~0x7u) * 8) + ((y & ~0x7u) * width) + xlut[x & 7] + ylut[y & 7];
+    return base + offs * size;
+}
+
+//Same as lroundf(clamp(d, 0, 1) * max) without the libm call
+uint32_t unorm(float d, uint32_t max)
+{
+    double v = std::clamp((double)d, 0.0, 1.0) * max + 0.5;
+    return (uint32_t)v;
+}
+
+uint32_t load_le(const uint8_t* p, int size)
+{
+    uint32_t v = 0;
+    for (int i = 0; i < size; i++)
+        v |= (uint32_t)p[i] << (8 * i);
+    return v;
+}
+
+void store_le(uint8_t* p, uint32_t v, int size)
+{
+    for (int i = 0; i < size; i++)
+        p[i] = (v >> (8 * i)) & 0xFF;
+}
+
+} // namespace
 
 const char* GPU::renderer_env()
 {
@@ -160,6 +231,7 @@ bool GPU::set_renderer(const char* name)
     fprintf(stderr, "[GPU] Renderer: Vulkan on %s\n", vk->device_name().c_str());
     hw = new HwRenderer();
     hw->vk = std::move(vk);
+    hw->timing = trace_enabled();
     return true;
 #else
     fprintf(stderr, "[GPU] This build has no Vulkan renderer (ENABLE_VULKAN=OFF); using software\n");
@@ -215,8 +287,21 @@ void GPU::hw_end_session()
     Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     h.session = false;
     h.tex_hashes.clear();
-    h.vk->end(h.color_written ? h.color.data() : nullptr, h.depth_written ? h.depth.data() : nullptr,
-              h.depth_written ? h.stencil.data() : nullptr);
+    {
+        HwTimer t(h.timing, h.t_wait);
+        h.vk->end(h.color_written ? h.color.data() : nullptr, h.depth_written ? h.depth.data() : nullptr,
+                  h.depth_written ? h.stencil.data() : nullptr);
+    }
+    HwTimer t(h.timing, h.t_writeback);
+    //Whole buffers in VRAM/FCRAM are written through one pointer instead of a lookup per pixel
+    uint8_t* color_mem = e->phys_ptr(h.color_addr, h.color_len);
+    uint8_t* depth_mem = e->phys_ptr(h.depth_addr, h.depth_len);
+    auto write_fb = [&](uint8_t* mem, uint32_t base, uint32_t addr, uint32_t v, int size) {
+        if (mem)
+            store_le(mem + (addr - base), v, size);
+        else
+            hw_write_fb(addr, v, size);
+    };
 
     if (h.color_written)
     {
@@ -227,23 +312,23 @@ void GPU::hw_end_session()
             {
                 uint32_t c = h.color[y * h.width + x];
                 uint32_t r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF, a = c >> 24;
-                uint32_t addr = get_swizzled_tile_addr(h.color_addr, h.frame_width, x, y, bpp);
+                uint32_t addr = tile_addr(h.color_addr, h.frame_width, x, y, bpp);
                 switch (h.color_fmt)
                 {
                     case 0:
-                        hw_write_fb(addr, a | (b << 8) | (g << 16) | (r << 24), 4);
+                        write_fb(color_mem, h.color_addr, addr, a | (b << 8) | (g << 16) | (r << 24), 4);
                         break;
                     case 1:
-                        hw_write_fb(addr, b | (g << 8) | (r << 16), 3);
+                        write_fb(color_mem, h.color_addr, addr, b | (g << 8) | (r << 16), 3);
                         break;
                     case 2:
-                        hw_write_fb(addr, ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7), 2);
+                        write_fb(color_mem, h.color_addr, addr, ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7), 2);
                         break;
                     case 3:
-                        hw_write_fb(addr, ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3), 2);
+                        write_fb(color_mem, h.color_addr, addr, ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3), 2);
                         break;
                     default:
-                        hw_write_fb(addr, ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4), 2);
+                        write_fb(color_mem, h.color_addr, addr, ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4), 2);
                         break;
                 }
             }
@@ -258,18 +343,18 @@ void GPU::hw_end_session()
             for (uint32_t x = 0; x < h.width; x++)
             {
                 size_t i = y * h.width + x;
-                uint32_t addr = get_swizzled_tile_addr(h.depth_addr, h.frame_width, x, y, bpp);
+                uint32_t addr = tile_addr(h.depth_addr, h.frame_width, x, y, bpp);
                 float d = h.depth[i];
                 switch (h.depth_fmt)
                 {
                     case 2:
-                        hw_write_fb(addr, (uint32_t)lroundf(d * 0xFFFFFF), 3);
+                        write_fb(depth_mem, h.depth_addr, addr, unorm(d, 0xFFFFFF), 3);
                         break;
                     case 3:
-                        hw_write_fb(addr, (uint32_t)lroundf(d * 0xFFFFFF) | ((uint32_t)h.stencil[i] << 24), 4);
+                        write_fb(depth_mem, h.depth_addr, addr, unorm(d, 0xFFFFFF) | ((uint32_t)h.stencil[i] << 24), 4);
                         break;
                     default:
-                        hw_write_fb(addr, (uint32_t)lroundf(d * 0xFFFF), 2);
+                        write_fb(depth_mem, h.depth_addr, addr, unorm(d, 0xFFFF), 2);
                         break;
                 }
             }
@@ -281,6 +366,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
 {
     Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     HwRenderer& h = *hw;
+    HwTimer poly_timer(h.timing, h.t_poly);
     using namespace VideoVulkan;
 
     if (!ctx.frame_width || !ctx.frame_height)
@@ -310,6 +396,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
 
     if (!h.session)
     {
+        HwTimer t(h.timing, h.t_begin);
         h.color_addr = ctx.color_buffer_base;
         h.depth_addr = ctx.depth_buffer_base;
         h.frame_width = fw;
@@ -327,12 +414,18 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
         h.stencil.resize(n);
 
         int cbpp = color_bpp(h.color_fmt), dbpp = depth_bpp(h.depth_fmt);
+        uint8_t* color_mem = e->phys_ptr(h.color_addr, h.color_len);
+        uint8_t* depth_mem = e->phys_ptr(h.depth_addr, h.depth_len);
+        auto read_fb = [&](uint8_t* mem, uint32_t base, uint32_t addr, int size) {
+            return mem ? load_le(mem + (addr - base), size) : hw_read_fb(addr, size);
+        };
+        h.pixels += n;
         for (uint32_t y = 0; y < h.height; y++)
         {
             for (uint32_t x = 0; x < h.width; x++)
             {
                 size_t i = y * h.width + x;
-                uint32_t v = hw_read_fb(get_swizzled_tile_addr(h.color_addr, fw, x, y, cbpp), cbpp);
+                uint32_t v = read_fb(color_mem, h.color_addr, tile_addr(h.color_addr, fw, x, y, cbpp), cbpp);
                 uint32_t r, g, b, a;
                 switch (h.color_fmt)
                 {
@@ -357,7 +450,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
                 }
                 h.color[i] = r | (g << 8) | (b << 16) | (a << 24);
 
-                uint32_t d = hw_read_fb(get_swizzled_tile_addr(h.depth_addr, fw, x, y, dbpp), dbpp);
+                uint32_t d = read_fb(depth_mem, h.depth_addr, tile_addr(h.depth_addr, fw, x, y, dbpp), dbpp);
                 switch (h.depth_fmt)
                 {
                     case 2:
@@ -397,6 +490,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
                 break;
             }
         }
+        HwTimer hash_timer(h.timing && !cached, h.t_hash);
         uint8_t* p = cached ? nullptr : e->phys_ptr(ctx.tex_addr[i], len);
         if (cached)
             h.tex_hash_hits++;
@@ -412,6 +506,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
         if (!cached)
         {
             h.tex_hashed++;
+            h.hashed_bytes += len;
             h.tex_hashes.push_back({ctx.tex_addr[i], len, (uint8_t)ctx.tex_type[i], hash});
         }
         tex_ids[i] = h.vk->texture(hash, w, th, [&](uint32_t* out) {
@@ -573,6 +668,14 @@ void GPU::hw_print_stats(int frame)
     fprintf(stderr, "[GPUTRACE] frame %d: vulkan sessions %llu draws %llu tex-hashed %llu tex-hash-hits %llu | %s\n",
             frame, (unsigned long long)hw->sessions, (unsigned long long)hw->draws,
             (unsigned long long)hw->tex_hashed, (unsigned long long)hw->tex_hash_hits, hw->vk->stats().c_str());
+    //Per frame over the last 60 frames: whole hw_polygon (includes upload and hashing), session
+    //upload, texture hashing, waiting for the GPU + readback, and the writeback to memory
+    HwRenderer& h = *hw;
+    fprintf(stderr, "[GPUTRACE] frame %d: vulkan ms/frame poly %.2f (upload %.2f hash %.2f, %.0f KB) "
+            "wait+readback %.2f writeback %.2f | upload px/frame %.0f\n", frame, h.t_poly / 60, h.t_begin / 60,
+            h.t_hash / 60, h.hashed_bytes / 60.0 / 1024.0, h.t_wait / 60, h.t_writeback / 60, h.pixels / 60.0);
+    h.t_poly = h.t_begin = h.t_hash = h.t_wait = h.t_writeback = 0;
+    h.hashed_bytes = h.pixels = 0;
 }
 
 #else // !BLOSSOM_HAS_VULKAN

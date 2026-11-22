@@ -52,6 +52,8 @@ struct Buffer
     uint8_t* map = nullptr;
     VkDeviceSize size = 0;
     VkDeviceSize offset = 0; //Ring/linear allocator position
+    bool coherent = true;
+    bool cached = false;
 };
 
 struct Image
@@ -165,7 +167,9 @@ struct VulkanRasterizer::Impl
     ~Impl();
     void init();
     uint32_t find_memory(uint32_t bits, VkMemoryPropertyFlags flags);
-    Buffer make_buffer(VkDeviceSize size, VkBufferUsageFlags usage);
+    //host_read: the CPU reads it back. Such buffers go in HOST_CACHED memory when the device has
+    //it: plain host-visible memory is write-combined on discrete GPUs and reading it is very slow.
+    Buffer make_buffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_read = false);
     void free_buffer(Buffer& b);
     Image make_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect);
     void free_image(Image& i);
@@ -224,7 +228,7 @@ uint32_t VulkanRasterizer::Impl::find_memory(uint32_t bits, VkMemoryPropertyFlag
     throw std::runtime_error("no suitable Vulkan memory type");
 }
 
-Buffer VulkanRasterizer::Impl::make_buffer(VkDeviceSize size, VkBufferUsageFlags usage)
+Buffer VulkanRasterizer::Impl::make_buffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_read)
 {
     Buffer b;
     b.size = size;
@@ -237,8 +241,33 @@ Buffer VulkanRasterizer::Impl::make_buffer(VkDeviceSize size, VkBufferUsageFlags
     vkGetBufferMemoryRequirements(device, b.buf, &req);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = req.size;
-    ai.memoryTypeIndex = find_memory(req.memoryTypeBits,
-                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    VkMemoryPropertyFlags wanted[3] = {visible | coherent, visible | coherent, visible | coherent};
+    if (host_read)
+    {
+        wanted[0] = visible | cached | coherent;
+        wanted[1] = visible | cached;
+    }
+    bool found = false;
+    for (VkMemoryPropertyFlags f : wanted)
+    {
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount && !found; i++)
+        {
+            if ((req.memoryTypeBits & (1u << i)) && (mem_props.memoryTypes[i].propertyFlags & f) == f)
+            {
+                ai.memoryTypeIndex = i;
+                b.coherent = (f & coherent) != 0;
+                b.cached = (mem_props.memoryTypes[i].propertyFlags & cached) != 0;
+                found = true;
+            }
+        }
+        if (found)
+            break;
+    }
+    if (!found)
+        ai.memoryTypeIndex = find_memory(req.memoryTypeBits, visible | coherent);
     check(vkAllocateMemory(device, &ai, nullptr, &b.mem), "vkAllocateMemory");
     check(vkBindBufferMemory(device, b.buf, b.mem, 0), "vkBindBufferMemory");
     void* p;
@@ -579,7 +608,7 @@ void VulkanRasterizer::Impl::make_target(uint32_t w, uint32_t h)
     fi.layers = 1;
     check(vkCreateFramebuffer(device, &fi, nullptr, &framebuffer), "vkCreateFramebuffer");
     //Color, depth (4 bytes per texel either way), stencil
-    readback = make_buffer((VkDeviceSize)w * h * 9 + 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    readback = make_buffer((VkDeviceSize)w * h * 9 + 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
 void VulkanRasterizer::Impl::free_target()
@@ -945,11 +974,11 @@ std::string VulkanRasterizer::stats() const
     VkDeviceSize staging_total = 0;
     for (auto& b : impl->staging)
         staging_total += b.size;
-    char buf[160];
-    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu",
+    char buf[200];
+    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu readback %s",
              impl->textures.size(), (unsigned long long)(impl->texture_bytes >> 20),
              (unsigned long long)(staging_total >> 20), impl->pipelines.size(),
-             (unsigned long long)impl->serial);
+             (unsigned long long)impl->serial, impl->readback.cached ? "cached" : "uncached");
     return buf;
 }
 
@@ -982,7 +1011,7 @@ void VulkanRasterizer::begin(uint32_t width, uint32_t height, const uint32_t* co
         if (d.depth_is_float)
             memcpy(&dp[i], &f, 4);
         else
-            dp[i] = (uint32_t)lroundf(f * 16777215.0f);
+            dp[i] = (uint32_t)((double)f * 16777215.0 + 0.5); //f is clamped, so this is lroundf
     }
     memcpy(p + n * 8, stencil, n);
 
@@ -1169,6 +1198,13 @@ void VulkanRasterizer::end(uint32_t* color, float* depth, uint8_t* stencil)
     d.submit_and_wait();
     d.session = false;
 
+    if (!d.readback.coherent)
+    {
+        VkMappedMemoryRange r{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        r.memory = d.readback.mem;
+        r.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(d.device, 1, &r);
+    }
     const uint8_t* p = d.readback.map;
     if (color)
         memcpy(color, p, n * 4);
