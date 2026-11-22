@@ -261,6 +261,7 @@ bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
     int slice = 256;
     if (const char* env = std::getenv("BLOSSOM_SLICE"))
         slice = atoi(env) > 0 ? atoi(env) : slice;
+    slice_cycles = slice;
     scheduler.set_max_cycles(slice);
     printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s, slice %d\n", arm11_jit ? "JIT" : "interpreter",
            arm9_jit ? "JIT" : "interpreter", slice);
@@ -405,7 +406,24 @@ void Emulator::run()
         const bool prof_loop = Profiler::enabled;
         if (prof_loop)
             Profiler::enter(Profiler::LOOP);
+        //Every core waiting for an interrupt: nothing can race, so with BLOSSOM_IDLE_SLICE=<cycles>
+        //the slice may run longer (still up to the next event). Interrupts raised by the timers or
+        //the DSP during it wake the cores at most that many cycles late.
+        static const int idle_slice = [] {
+            const char* env = getenv("BLOSSOM_IDLE_SLICE");
+            return env ? atoi(env) : 0;
+        }();
+        const bool idle = arm11[0].is_halted() && arm11[1].is_halted() &&
+                          (!is_n3ds || (arm11[2].is_halted() && arm11[3].is_halted())) && arm9.is_halted();
+        if (idle)
+        {
+            Profiler::counters[Profiler::IDLE_SLICES]++;
+            if (idle_slice > 0)
+                scheduler.set_max_cycles(idle_slice);
+        }
         scheduler.calculate_cycles_to_run();
+        if (idle && idle_slice > 0)
+            scheduler.set_max_cycles(slice_cycles);
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
         Profiler::counters[Profiler::SLICES]++;

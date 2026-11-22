@@ -112,6 +112,7 @@ class Emulator
         bool set_cpu_backend(bool arm11_jit, bool arm9_jit);
         void pxi_sync_point(bool from_arm9);
         uint64_t memory_check_counter = 0;
+        int slice_cycles = 256; //normal scheduler slice (BLOSSOM_SLICE)
 
         //Watchdog thread: reports where the emulator is when a frame takes too long or memory
         //grows past BLOSSOM_MAX_RAM_MB, and stops the process in the second case

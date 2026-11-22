@@ -58,6 +58,7 @@ enum Counter
     SLICES,
     JIT_COMPILES,
     SHORT_SLICES,
+    IDLE_SLICES,
     COUNTER_COUNT
 };
 

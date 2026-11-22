@@ -94,7 +94,7 @@ const char* counter_names[COUNTER_COUNT] =
 {
     "jit-icache-invals", "jit-range-invals", "jit-fallbacks", "jit-new-contexts",
     "jit-translated-instrs", "jit-slow-reads", "jit-slow-writes", "jit-changed-chunks",
-    "slices", "jit-compiles", "short-slices"
+    "slices", "jit-compiles", "short-slices", "idle-slices"
 };
 
 const char* names[BUCKET_COUNT] =
