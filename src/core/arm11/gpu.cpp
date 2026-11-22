@@ -23,6 +23,13 @@ static constexpr uint32_t MortonInterleave(uint32_t x, uint32_t y)
     return xlut[x % 8] + ylut[y % 8];
 }
 
+//GPU::get_swizzled_tile_addr as an inline function, for per-pixel loops
+static inline uint32_t tile_addr_inline(uint32_t base, uint32_t width, uint32_t x, uint32_t y, uint32_t size)
+{
+    uint32_t offs = ((x & ~0x7) * 8) + ((y & ~0x7) * width) + MortonInterleave(x, y);
+    return base + offs * size;
+}
+
 // https://github.com/citra-emu/citra/blob/master/src/common/color.h
 // Convert a 1-bit color component to 8 bit
 constexpr uint32_t Convert1To8(uint32_t value) {
@@ -236,22 +243,32 @@ void GPU::render_fb_pixel(uint8_t *screen, int fb_index, int x, int y)
     uint32_t screen_pos = (x + (y * 240)) * 4;
     y *= screen_fb->stride;
     uint32_t color = 0xFF000000;
+    //Framebuffers live in VRAM or FCRAM: read them through a pointer, not the ARM11 bus
+    auto rd = [&](uint32_t addr, int size) -> uint32_t {
+        if (uint8_t* p = e->phys_ptr(addr, size))
+        {
+            uint32_t v = 0;
+            memcpy(&v, p, size);
+            return v;
+        }
+        return size == 1 ? e->arm11_read8(0, addr) : size == 2 ? e->arm11_read16(0, addr) : e->arm11_read32(0, addr);
+    };
     switch (screen_fb->color_format)
     {
         case 0:
             x *= 4;
-            color = bswp32(e->arm11_read32(0, start + x + y));
+            color = bswp32(rd(start + x + y, 4));
             break;
         case 1:
             x *= 3;
-            color |= e->arm11_read8(0, start + x + y) << 16;
-            color |= e->arm11_read8(0, start + x + y + 1) << 8;
-            color |= e->arm11_read8(0, start + x + y + 2);
+            color |= rd(start + x + y, 1) << 16;
+            color |= rd(start + x + y + 1, 1) << 8;
+            color |= rd(start + x + y + 2, 1);
             break;
         case 2:
         {
             x *= 2;
-            uint16_t cin = e->arm11_read16(0, start + x + y);
+            uint16_t cin = rd(start + x + y, 2);
             uint32_t pr = Convert5To8((cin >> 11) & 0x1F); //byte-aligned pixel red
             uint32_t pb = Convert5To8((cin >>  0) & 0x1F); //byte-aligned pixel blue
             uint32_t pg = Convert6To8((cin >>  5) & 0x3F); //byte-aligned pixel green
@@ -262,7 +279,7 @@ void GPU::render_fb_pixel(uint8_t *screen, int fb_index, int x, int y)
         case 4:
         {
             x *= 2;
-            uint16_t cin = e->arm11_read16(0, start + x + y);
+            uint16_t cin = rd(start + x + y, 2);
             color = Convert4To8(cin >> 12);
             color |= Convert4To8((cin >> 8) & 0xF) << 8;
             color |= Convert4To8((cin >> 4) & 0xF) << 16;
@@ -292,14 +309,46 @@ uint32_t GPU::get_swizzled_tile_addr(uint32_t base, uint32_t width, uint32_t x, 
 void GPU::do_transfer_engine_dma(uint64_t param)
 {
     Profiler::Scope prof_scope(Profiler::GPU_TRANSFER);
+    //VRAM/FCRAM are plain memory: go through a pointer instead of the ARM11 bus for each pixel
+    auto rd = [&](uint32_t addr, int size) -> uint32_t {
+        if (uint8_t* p = e->phys_ptr(addr, size))
+        {
+            uint32_t v = 0;
+            memcpy(&v, p, size);
+            return v;
+        }
+        switch (size)
+        {
+            case 1: return e->arm11_read8(0, addr);
+            case 2: return e->arm11_read16(0, addr);
+            default: return e->arm11_read32(0, addr);
+        }
+    };
+    auto wr = [&](uint32_t addr, uint32_t v, int size) {
+        if (uint8_t* p = e->phys_ptr(addr, size))
+        {
+            memcpy(p, &v, size);
+            return;
+        }
+        switch (size)
+        {
+            case 1: e->arm11_write8(0, addr, v); break;
+            case 2: e->arm11_write16(0, addr, v); break;
+            case 3:
+                for (int i = 0; i < 3; i++)
+                    e->arm11_write8(0, addr + i, (v >> (8 * i)) & 0xFF);
+                break;
+            default: e->arm11_write32(0, addr, v); break;
+        }
+    };
     if (dma.flags & (1 << 3))
     {
         printf("[GPU] Doing TexCopy\n");
 
         for (unsigned int i = 0; i < dma.tc_size; i++)
         {
-            uint8_t data = e->arm11_read8(0, dma.input_addr);
-            e->arm11_write8(0, dma.output_addr, data);
+            uint8_t data = rd(dma.input_addr, 1);
+            wr(dma.output_addr, data, 1);
 
             dma.input_addr++;
             dma.output_addr++;
@@ -360,7 +409,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                 uint32_t color = 0;
 
                 if (!linear_to_tiled)
-                    input_addr = get_swizzled_tile_addr(
+                    input_addr = tile_addr_inline(
                             dma.input_addr, dma.disp_input_width, input_x, input_y, input_size);
                 else
                     input_addr = dma.input_addr + (input_x + (input_y * dma.disp_input_width)) * input_size;
@@ -368,11 +417,11 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                 switch (input_format)
                 {
                     case 0:
-                        color = bswp32(e->arm11_read32(0, input_addr));
+                        color = bswp32(rd(input_addr, 4));
                         break;
                     case 1:
                     {
-                        color = e->arm11_read32(0, input_addr);
+                        color = rd(input_addr, 4);
 
                         uint8_t pr = (color >> 16) & 0xFF;
                         uint8_t pg = (color >> 8) & 0xFF;
@@ -383,7 +432,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                         break;
                     case 2:
                     {
-                        color = e->arm11_read16(0, input_addr);
+                        color = rd(input_addr, 2);
                         uint32_t pr = Convert5To8((color >> 11) & 0x1F); //byte-aligned pixel red
                         uint32_t pb = Convert5To8((color >>  0) & 0x1F); //byte-aligned pixel blue
                         uint32_t pg = Convert6To8((color >>  5) & 0x3F); //byte-aligned pixel green
@@ -393,7 +442,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                     }
                     case 3:
                     {
-                        color = e->arm11_read16(0, input_addr);
+                        color = rd(input_addr, 2);
 
                         uint8_t r = Convert5To8((color >> 11) & 0x1F);
                         uint8_t g = Convert5To8((color >> 6) & 0x1F);
@@ -405,7 +454,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                         break;
                     case 4:
                     {
-                        color = e->arm11_read16(0, input_addr);
+                        color = rd(input_addr, 2);
 
                         uint8_t r = Convert4To8(color >> 12);
                         uint8_t g = Convert4To8((color >> 8) & 0xF);
@@ -435,20 +484,18 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                     uint32_t output_x = x;
                     uint32_t output_y = y;
 
-                    output_addr = get_swizzled_tile_addr(dma.output_addr, dma.disp_output_width,
+                    output_addr = tile_addr_inline(dma.output_addr, dma.disp_output_width,
                                                          output_x, output_y, output_size);
                 }
 
                 switch (output_format)
                 {
                     case 0:
-                        e->arm11_write32(0, output_addr, bswp32(r | (g << 8) | (b << 16) | (a << 24)));
+                        wr(output_addr, bswp32(r | (g << 8) | (b << 16) | (a << 24)), 4);
                         break;
                     case 1:
                     {
-                        e->arm11_write8(0, output_addr, b);
-                        e->arm11_write8(0, output_addr + 1, g);
-                        e->arm11_write8(0, output_addr + 2, r);
+                        wr(output_addr, b | (g << 8) | (r << 16), 3);
                     }
                         break;
                     case 2:
@@ -456,7 +503,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                         color |= Convert8To5(b);
                         color |= Convert8To6(g) << 5;
                         color |= Convert8To5(r) << 11;
-                        e->arm11_write16(0, output_addr, color);
+                        wr(output_addr, color, 2);
                         break;
                     case 3:
                         color = 0;
@@ -464,7 +511,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                         color |= Convert8To5(b) << 1;
                         color |= Convert8To5(g) << 6;
                         color |= Convert8To5(r) << 11;
-                        e->arm11_write16(0, output_addr, color);
+                        wr(output_addr, color, 2);
                         break;
                     case 4:
                         color = 0;
@@ -473,7 +520,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                         color |= Convert8To4(g) << 8;
                         color |= Convert8To4(r) << 12;
 
-                        e->arm11_write16(0, output_addr, color);
+                        wr(output_addr, color, 2);
                         break;
                     default:
                         EmuException::die("[GPU] Unrecognized output format %d\n", output_format);
