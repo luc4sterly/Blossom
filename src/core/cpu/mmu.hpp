@@ -1,6 +1,7 @@
 #ifndef MMU_HPP
 #define MMU_HPP
 #include <cstdint>
+#include "core/cpu/page_regions.hpp"
 
 enum MMU_Perm
 {
@@ -55,6 +56,25 @@ class MMU
 
         PU_Region pu_regions[8];
 
+        //1 MB regions of the user/privileged mappings that hold entries (to flush only those)
+        PageRegions tlb_regions;
+
+        //Page table of the JIT running on this MMU, if any. Its entries are a cache of the
+        //privileged/direct mappings and must be dropped whenever those change.
+        JitPageTable* jit_page_table;
+
+        inline void set_tlb_entry(uint32_t page, uint8_t* privileged, uint8_t* user)
+        {
+            if (privileged || user)
+                tlb_regions.mark(page);
+            privileged_mapping[page] = privileged;
+            user_mapping[page] = user;
+            if (jit_page_table)
+                jit_page_table->invalidate_page(page);
+        }
+
+        void flush_tlb_range(uint32_t start_page, uint32_t page_count);
+
         void unmap_pu_region(int index);
         void remap_pu_region(int index);
 
@@ -70,6 +90,7 @@ class MMU
         ~MMU();
 
         void reset();
+        void set_jit_page_table(JitPageTable* table);
         void add_physical_mapping(uint8_t* mem, uint32_t base, uint32_t size);
         void remove_physical_mapping(uint32_t base, uint32_t size);
 
@@ -85,6 +106,8 @@ class MMU
 
         uint32_t get_l1_table_base(int index);
         uint32_t get_l1_table_control();
+        //First virtual address translated through TTBR1 (TTBCR.N > 0), or 0 if TTBR0 covers all
+        uint32_t get_ttbr1_boundary();
         uint32_t get_domain_control();
         void set_l1_table_base(int index, uint32_t value);
         void set_l1_table_control(uint32_t value);

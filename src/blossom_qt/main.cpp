@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -7,7 +9,16 @@
 using namespace std;
 
 int main(int argc, char** argv)
-{   
+{
+    //The emulator core prints a lot of debug chatter to stdout (GPU command lists, PXI, interrupt
+    //controller...). Line-buffered or console output turns each line into a system call, which
+    //cost a big share of every frame on Windows. A large buffer keeps it cheap; BLOSSOM_LOG_FLUSH=1
+    //restores line buffering for live logs.
+    static char stdout_buffer[1 << 20];
+    const char* flush_env = getenv("BLOSSOM_LOG_FLUSH");
+    if (!(flush_env && flush_env[0] == '1'))
+        setvbuf(stdout, stdout_buffer, _IOFBF, sizeof(stdout_buffer));
+
     QApplication a(argc, argv);
     QApplication::setApplicationName("Blossom");
 
@@ -22,6 +33,8 @@ int main(int argc, char** argv)
         {"sd", "SD image dump. Optional, but required for sighaxed NANDs.", "sd"},
         {"autoload", "3DS cartridge. Starts emulation immediately.", "cart"},
         {"autoload-nocart", "Starts emulation immediately without a cartridge."},
+        {"cpu", "CPU backend for this run: jit (default), jit11 (JIT on ARM11 only) or interp "
+                "(interpreter, for debugging and comparing).", "backend"},
         {"dev-unsigned", "Development: accept the self-signed NCSD header of a synthetic NAND "
                          "built with tools/mknand. Real signatures are still checked."}
     });
@@ -48,6 +61,7 @@ int main(int argc, char** argv)
         Settings::sd_path = sd_path;
 
     Settings::dev_unsigned = parser.isSet("dev-unsigned");
+    Settings::cpu_backend_override = parser.value("cpu");
 
     //The order of this is important - we need to save settings before EmuWindow is constructed.
     //Otherwise, the settings window will have the old settings in the UI.

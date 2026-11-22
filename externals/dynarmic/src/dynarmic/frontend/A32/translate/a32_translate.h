@@ -1,0 +1,68 @@
+/* This file is part of the dynarmic project.
+ * Copyright (c) 2016 MerryMage
+ * SPDX-License-Identifier: 0BSD
+ */
+#pragma once
+
+#include <mcl/stdint.hpp>
+
+#include "dynarmic/interface/A32/arch_version.h"
+
+namespace Dynarmic::IR {
+class Block;
+}  // namespace Dynarmic::IR
+
+namespace Dynarmic::A32 {
+
+class LocationDescriptor;
+struct TranslateCallbacks;
+
+struct TranslationOptions {
+    ArchVersion arch_version;
+
+    /// This changes what IR we emit when we translate an unpredictable instruction.
+    /// If this is false, the ExceptionRaised IR instruction is emitted.
+    /// If this is true, we define some behaviour for some instructions.
+    bool define_unpredictable_behaviour = false;
+
+    /// This changes what IR we emit when we translate a hint instruction.
+    /// If this is false, we treat the instruction as a NOP.
+    /// If this is true, we emit an ExceptionRaised instruction.
+    bool hook_hint_instructions = true;
+
+    /// Blossom (LLE): send privileged/system instructions that dynarmic only models for user mode
+    /// (coprocessor access, MSR to the control field, CPS, WFI/WFE/SEV, VFP while FPEXC.EN = 0, and
+    /// every unpredictable/undefined encoding) to UserCallbacks::InterpreterFallback.
+    bool interpret_system_instructions = false;
+
+    /// Blossom (LLE): with interpret_system_instructions, still compile MRC p15, 0, Rt, c13, c0, {2-4}
+    /// (thread ID registers) through the registered coprocessor 15.
+    bool fast_cp15_thread_id = false;
+
+    /// Blossom: stop a block after this many instructions (0 = no limit).
+    size_t max_block_instructions = 0;
+
+    /// Blossom: instructions with PC in [interpret_lo, interpret_hi] go to the interpreter (hi = 0: off).
+    u32 interpret_lo = 0;
+    u32 interpret_hi = 0;
+};
+
+/**
+ * This function translates instructions in memory into our intermediate representation.
+ * @param descriptor The starting location of the basic block. Includes information like PC, Thumb state, &c.
+ * @param tcb The callbacks we should use to read emulated memory.
+ * @param options Configures how certain instructions are translated.
+ * @return A translated basic block in the intermediate representation.
+ */
+IR::Block Translate(LocationDescriptor descriptor, TranslateCallbacks* tcb, const TranslationOptions& options);
+
+/**
+ * This function translates a single provided instruction into our intermediate representation.
+ * @param block The block to append the IR for the instruction to.
+ * @param descriptor The location of the instruction. Includes information like PC, Thumb state, &c.
+ * @param instruction The instruction to translate.
+ * @return The translated instruction translated to the intermediate representation.
+ */
+bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor, u32 instruction);
+
+}  // namespace Dynarmic::A32

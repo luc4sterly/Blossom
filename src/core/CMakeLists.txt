@@ -50,6 +50,7 @@ add_library(blossom_core STATIC
     cpu/cp15.hpp
     cpu/mmu.cpp
     cpu/mmu.hpp
+    cpu/page_regions.hpp
     cpu/thumb_disasm.cpp
     cpu/thumb_interpret.cpp
     cpu/vfp.cpp
@@ -77,6 +78,12 @@ target_link_libraries(blossom_core
     PUBLIC blossom_common GMP::GMP
     PRIVATE blossom_warnings
 )
+
+if (ENABLE_JIT)
+    target_sources(blossom_core PRIVATE cpu/arm_jit.cpp cpu/arm_jit.hpp)
+    target_link_libraries(blossom_core PRIVATE dynarmic)
+    target_compile_definitions(blossom_core PUBLIC BLOSSOM_HAS_JIT=1)
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(blossom_core PUBLIC Threads::Threads)

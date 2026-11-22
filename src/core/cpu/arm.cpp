@@ -1,4 +1,6 @@
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <sstream>
 #include <utility>
@@ -7,7 +9,135 @@
 #include "core/cpu/arm_interpret.hpp"
 #include "core/cpu/vfp.hpp"
 #include "common/common.hpp"
+#ifdef BLOSSOM_HAS_JIT
+#include "core/cpu/arm_jit.hpp"
+#endif
 #include "core/emulator.hpp"
+
+//The SVC/IPC trace reads guest memory on every SVC and floods stdout, which ends up costing more
+//than the JIT saves. Enable it with BLOSSOM_TRACE_SVC=1.
+//BLOSSOM_TRACE_SVC=2 prints no per-SVC lines; instead, every 60 frames, each process's SVCs and
+//service requests are counted on one line on stderr (see ARM_CPU::print_svc_stats). Small enough to share.
+static int trace_svc_level()
+{
+    static const int level = [] {
+        const char* env = getenv("BLOSSOM_TRACE_SVC");
+        return env ? atoi(env) : 0;
+    }();
+    return level;
+}
+
+//BLOSSOM_SKIP_SETUP=1: when a process reads cfg block 0x00110000 (system setup required) or
+//0x000D0000 (accepted EULA version), the reply is patched to "setup done" and EULA 0x7F7F, as
+//Azahar does, so NS boots the HOME Menu instead of System Settings' first-time setup.
+static bool skip_setup_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_SKIP_SETUP");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool trace_svc_enabled()
+{
+    return trace_svc_level() >= 1 || skip_setup_enabled();
+}
+
+static bool trace_svc_lines()
+{
+    return trace_svc_level() == 1;
+}
+
+struct CfgRequest { uint32_t block, size; };
+static std::deque<CfgRequest> cfg_requests;
+
+//(pid, name) -> (what, count)
+static std::map<std::pair<int, std::string>, std::map<std::string, uint64_t>> svc_stats;
+
+static void count_svc(int pid, const std::string& procname, const std::string& what)
+{
+    if (trace_svc_level() >= 2)
+        svc_stats[{pid, procname}][what]++;
+}
+
+void ARM_CPU::print_svc_stats(int frame)
+{
+    if (trace_svc_level() < 2 || frame % 60)
+        return;
+    for (auto& [proc, counts] : svc_stats)
+    {
+        fprintf(stderr, "[SVCSTAT] frame %d PID%d[%s]:", frame, proc.first, proc.second.c_str());
+        for (auto& [what, n] : counts)
+            fprintf(stderr, " %s x%llu", what.c_str(), (unsigned long long)n);
+        fprintf(stderr, "\n");
+    }
+    svc_stats.clear();
+}
+
+//BLOSSOM_TRACE_MMIO=1 logs every I/O register access by the ARM11 cores to stderr (physical
+//address). Accesses repeated in a polling loop are counted instead of printed. Both CPU backends go
+//through here, so interpreter and JIT logs can be compared line by line. The ARM9 is left out on
+//purpose: it writes console keys to the AES engine, and these logs get shared.
+static int trace_mmio_level()
+{
+    static const int level = [] {
+        const char* env = getenv("BLOSSOM_TRACE_MMIO");
+        return env ? atoi(env) : 0;
+    }();
+    return level;
+}
+
+static bool trace_mmio_enabled()
+{
+    return trace_mmio_level() >= 1;
+}
+
+//BLOSSOM_TRACE_MMIO=2 also logs every ARM11 write to memory (virtual address, lower-case 'w').
+//JIT writes that hit the page table skip ARM_CPU::write*, so use it with BLOSSOM_JIT_SAFE=1.
+static bool trace_writes_enabled()
+{
+    return trace_mmio_level() >= 2;
+}
+
+static void trace_mmio(int id, char kind, int bits, uint32_t addr, uint32_t value)
+{
+    //Accesses already seen recently with the same value (a polling loop of up to 8 accesses)
+    //are only counted
+    struct Access { char kind; int bits; uint32_t addr, value; };
+    struct History { Access recent[8]; int count = 0, next = 0; uint64_t skipped = 0; };
+    static History history[16];
+    static uint64_t lines = 0;
+    const uint64_t MAX_LINES = 2000000;
+
+    History& h = history[id & 0xF];
+    for (int i = 0; i < h.count; i++)
+    {
+        const Access& r = h.recent[i];
+        if (r.kind == kind && r.bits == bits && r.addr == addr && r.value == value)
+        {
+            h.skipped++;
+            return;
+        }
+    }
+    h.recent[h.next] = {kind, bits, addr, value};
+    h.next = (h.next + 1) % 8;
+    if (h.count < 8)
+        h.count++;
+
+    if (lines >= MAX_LINES)
+        return;
+    if (h.skipped)
+    {
+        fprintf(stderr, "[MMIO] ARM%d   (%llu repeated accesses)\n", id, (unsigned long long)h.skipped);
+        h.skipped = 0;
+        lines++;
+    }
+    fprintf(stderr, "[MMIO] ARM%d %c%d $%08X = $%0*X\n", id, kind, bits, addr, bits / 4, value);
+    lines++;
+    if (lines == MAX_LINES)
+        fprintf(stderr, "[MMIO] line limit reached, tracing stops\n");
+}
 
 uint64_t ARM_CPU::global_exclusive_start[4];
 uint64_t ARM_CPU::global_exclusive_end[4];
@@ -89,7 +219,68 @@ void PSR_Flags::set(uint32_t value)
 
 ARM_CPU::ARM_CPU(Emulator* e, int id, CP15* cp15, VFP* vfp) : e(e), id(id), cp15(cp15), vfp(vfp)
 {
+    in_jit = false;
+    test_console = false;
+    debug_cycles = 0;
+}
 
+ARM_CPU::~ARM_CPU() = default;
+
+bool ARM_CPU::jit_available()
+{
+#ifdef BLOSSOM_HAS_JIT
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool ARM_CPU::set_jit_enabled(bool enabled, Dynarmic::ExclusiveMonitor* monitor)
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (!enabled)
+    {
+        if (jit)
+            jit->leave();
+        jit.reset();
+        return true;
+    }
+    if (!jit)
+        jit = std::make_unique<ARM_JIT>(*this, monitor);
+    return true;
+#else
+    (void)monitor;
+    return !enabled;
+#endif
+}
+
+bool ARM_CPU::is_jit_enabled() const
+{
+    return jit != nullptr;
+}
+
+void ARM_CPU::take_debug_stats(uint64_t& fallbacks, uint64_t& cycles)
+{
+    fallbacks = 0;
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        fallbacks = jit->take_fallback_count();
+#endif
+    cycles = debug_cycles;
+    debug_cycles = 0;
+}
+
+void ARM_CPU::print_jit_stats()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        jit->print_fallback_stats();
+#endif
+}
+
+void ARM_CPU::set_test_console(bool enabled)
+{
+    test_console = enabled;
 }
 
 std::string ARM_CPU::get_reg_name(int id)
@@ -138,22 +329,106 @@ void ARM_CPU::reset()
     can_disassemble = false;
     event_pending = false;
     halted = false;
+    slice_ended = false;
     waiting_for_event = false;
     int_pending = false;
 
     local_exclusive_start = 0;
     local_exclusive_end = 0;
+
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+        jit->reset();
+#endif
+}
+
+void ARM_CPU::interpret_one()
+{
+    try
+    {
+        if (CPSR.thumb)
+        {
+            fetch_new_instr_ptr(gpr[15] - 2);
+            if (prefetch_abort_occurred)
+                throw EmuException::ARMPrefetchAbort(gpr[15] - 2);
+            uint16_t instr = *(uint16_t*)&instr_ptr[(gpr[15] - 2) & 0xFFF];
+            gpr[15] += 2;
+            if (can_disassemble)
+                printf("[$%08X] $%04X  %s\n", gpr[15] - 4, instr, ARM_Disasm::disasm_thumb(*this, instr).c_str());
+            ARM_Interpreter::interpret_thumb(*this, instr);
+        }
+        else
+        {
+            fetch_new_instr_ptr(gpr[15] - 4);
+            if (prefetch_abort_occurred)
+                throw EmuException::ARMPrefetchAbort(gpr[15] - 4);
+            uint32_t instr = *(uint32_t*)&instr_ptr[(gpr[15] - 4) & 0xFFF];
+            gpr[15] += 4;
+            if (can_disassemble)
+                printf("[$%08X] $%08X  %s\n", gpr[15] - 8, instr, ARM_Disasm::disasm_arm(*this, instr).c_str());
+            ARM_Interpreter::interpret_arm(*this, instr);
+        }
+        cycles_ran++;
+    }
+    catch (EmuException::ARMDataAbort& a)
+    {
+        data_abort(a.vaddr, a.is_write);
+    }
+    catch (EmuException::ARMPrefetchAbort& p)
+    {
+        prefetch_abort(p.vaddr);
+    }
+}
+
+uint32_t ARM_CPU::debug_pc()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit && in_jit)
+        return jit->live_pc();
+#endif
+    return gpr[15];
+}
+
+void ARM_CPU::debug_report()
+{
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+    {
+        jit->debug_report();
+        return;
+    }
+#endif
+    fprintf(stderr, "[WATCHDOG] ARM%d interp: pc $%08X%s cycles %d\n", id, gpr[15], halted ? " halt" : "", cycles_ran);
+}
+
+void ARM_CPU::end_slice()
+{
+    slice_ended = true;
+#ifdef BLOSSOM_HAS_JIT
+    if (in_jit)
+        jit->end_slice();
+#endif
 }
 
 void ARM_CPU::run(int cycles)
 {
+    slice_ended = false;
     if (halted)
         return;
+
+#ifdef BLOSSOM_HAS_JIT
+    if (jit)
+    {
+        jit->run(cycles);
+        debug_cycles += cycles_ran;
+        return;
+    }
+#endif
 
     try
     {
         cycles_ran = 0;
-        while (!halted && cycles_ran < cycles)
+        while (!halted && !slice_ended && cycles_ran < cycles)
         {
             if (CPSR.thumb)
             {
@@ -197,6 +472,7 @@ void ARM_CPU::run(int cycles)
         prefetch_abort(p.vaddr);
     }
 
+    debug_cycles += cycles_ran;
     if (int_pending)
         int_check();
 }
@@ -294,9 +570,9 @@ void ARM_CPU::swi()
     if (!CPSR.thumb)
         op = read32(gpr[15] - 8) & 0xFF;
     else
-        op = read32(gpr[15] - 4) & 0xFF;
+        op = read16(gpr[15] - 4) & 0xFF;
 
-    if (id == 9)
+    if (id == 9 || test_console)
     {
         //printf("SWI $%02X!\n", op);
         if (op == 0xFF)
@@ -309,11 +585,12 @@ void ARM_CPU::swi()
             return;
         }
     }
-    else
+    else if (trace_svc_enabled())
     {
         //uint32_t process_ptr = read32(0xFFFF9004);
         //printf("SVC $%02X, PID%d\n", op, read32(process_ptr + 0xB4));
-        printf("[ARM%d] SVC $%02X!\n", id, op);
+        if (trace_svc_lines())
+            printf("[ARM%d] SVC $%02X!\n", id, op);
         //printf("SVC $%04X!\n", gpr[7]);
 
         //Trace of service sessions: remember which handle srv gave out for which name, so that
@@ -331,11 +608,117 @@ void ARM_CPU::swi()
                 //The thread runs again, so srv has replied into its command buffer
                 uint32_t result = read32(tls + 0x84);
                 uint32_t handle = read32(tls + 0x8C);
-                printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
-                       pid, procname.c_str(), it->second.c_str(), result, handle);
+                if (trace_svc_lines())
+                    printf("(PID%d[%s]) srv GetServiceHandle \"%s\" -> result $%08X, handle $%08X\n",
+                           pid, procname.c_str(), it->second.c_str(), result, handle);
                 if (result == 0)
                     service_handles[{pid, handle}] = it->second;
                 pending_service.erase(it);
+            }
+            //Result of this thread's last service request: the reply sits in its command buffer
+            //when it next does an SVC (if it hasn't written a new request with another command
+            //id yet). Failures are counted as "FAIL service:header=result".
+            struct PendingReply { std::string service; uint32_t header, block, size, ptr; };
+            static std::map<std::pair<int, uint32_t>, PendingReply> pending_reply;
+            auto rep_it = pending_reply.find({pid, tls});
+            if (rep_it != pending_reply.end())
+            {
+                uint32_t reply_header = read32(tls + 0x80);
+                uint32_t result = read32(tls + 0x84);
+                const PendingReply& pr = rep_it->second;
+                bool same_cmd = (reply_header >> 16) == (pr.header >> 16);
+                if (same_cmd && (result & 0x80000000))
+                {
+                    char what[96];
+                    snprintf(what, sizeof(what), "FAIL %s:%08X=%08X", pr.service.c_str(),
+                             pr.header, result);
+                    count_svc(pid, procname, what);
+                    if (trace_svc_level() >= 2)
+                    {
+                        static int fail_lines = 0;
+                        if (fail_lines++ < 400)
+                            fprintf(stderr, "[SVCFAIL] PID%d[%s] %s\n", pid, procname.c_str(), what);
+                    }
+                }
+                pending_reply.erase(rep_it);
+            }
+            if (op == 0x32)
+            {
+                auto named = service_handles.find({pid, gpr[0]});
+                uint32_t hdr = read32(tls + 0x80);
+                PendingReply pr{named != service_handles.end() ? named->second : "?", hdr, 0, 0, 0};
+                //cfg GetConfigInfoBlk2 / GetConfigInfoBlk8 (cfg:s) / GetConfigInfoBlk8 (cfg:i):
+                //size, block ID, buffer descriptor, buffer pointer
+                if ((hdr == 0x00010082 || hdr == 0x04010082 || hdr == 0x08010082)
+                    && pr.service.rfind("cfg:", 0) == 0)
+                {
+                    pr.size = read32(tls + 0x84);
+                    pr.block = read32(tls + 0x88);
+                    pr.ptr = read32(tls + 0x90);
+                    if (skip_setup_enabled())
+                    {
+                        cfg_requests.push_back({pr.block, pr.size});
+                        if (cfg_requests.size() > 64)
+                            cfg_requests.pop_front();
+                    }
+                }
+                pending_reply[{pid, tls}] = pr;
+                if (hdr == 0x00010800)
+                {
+                    //err:f ThrowFatalError: type, result code, PC, PID, title IDs
+                    uint32_t w[9];
+                    for (int i = 0; i < 9; i++)
+                        w[i] = read32(tls + 0x84 + i * 4);
+                    fprintf(stderr, "[ERRF] PID%d[%s] type %d result $%08X pc $%08X pid $%X "
+                            "title %08X %08X app %08X %08X\n", pid, procname.c_str(), w[0] & 0xFF,
+                            w[1], w[2], w[3], w[5], w[4], w[7], w[6]);
+                }
+            }
+            //The patch is applied on cfg's side, when it replies (svcReplyAndReceive): the block
+            //data is in the mapped buffer, which is still mapped in cfg, and the requester hasn't
+            //run yet. The reply only gives the size, so match it with the oldest request of that size.
+            if (op == 0x4F && skip_setup_enabled() && procname.rfind("cfg", 0) == 0 && gpr[3])
+            {
+                uint32_t hdr = read32(tls + 0x80);
+                if (hdr == 0x00010042 || hdr == 0x04010042 || hdr == 0x08010042)
+                {
+                    uint32_t result = read32(tls + 0x84);
+                    uint32_t size = read32(tls + 0x88) >> 4;
+                    uint32_t ptr = read32(tls + 0x8C);
+                    for (auto req = cfg_requests.begin(); req != cfg_requests.end(); ++req)
+                    {
+                        if (req->size != size)
+                            continue;
+                        uint32_t block = req->block;
+                        cfg_requests.erase(req);
+                        if (result != 0)
+                            break;
+                        try
+                        {
+                            if (block == 0x00110000 && size >= 1)
+                            {
+                                write8(ptr, 1);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x00110000 -> setup done\n");
+                            }
+                            else if (block == 0x000D0000 && size >= 2)
+                            {
+                                write8(ptr, 0x7F);
+                                write8(ptr + 1, 0x7F);
+                                fprintf(stderr, "[SKIP_SETUP] cfg block 0x000D0000 -> EULA 7F.7F\n");
+                            }
+                        }
+                        catch (const EmuException::ARMDataAbort&)
+                        {
+                        }
+                        break;
+                    }
+                }
+            }
+            if (op != 0x32)
+            {
+                char what[16];
+                snprintf(what, sizeof(what), "svc%02X", op);
+                count_svc(pid, procname, what);
             }
         }
 
@@ -349,7 +732,14 @@ void ARM_CPU::swi()
             get_hos_process_info(*this, pid, procname);
 
             auto named = service_handles.find({pid, gpr[0]});
-            printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
+            {
+                char what[64];
+                snprintf(what, sizeof(what), "%s:%08X",
+                         named != service_handles.end() ? named->second.c_str() : "?", header);
+                count_svc(pid, procname, what);
+            }
+            if (trace_svc_lines())
+                printf("(PID%d[%s]) SendSyncRequest: $%08X (handle $%08X%s%s)\n", pid, procname.c_str(), header,
                    gpr[0], named != service_handles.end() ? " = " : "",
                    named != service_handles.end() ? named->second.c_str() : "");
 
@@ -366,7 +756,8 @@ void ARM_CPU::swi()
                     printable &= name[i] >= 0x20 && name[i] < 0x7F;
                 if (printable)
                 {
-                    printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
+                    if (trace_svc_lines())
+                        printf("(PID%d[%s]) srv %s \"%s\"\n", pid, procname.c_str(),
                            header == 0x00050100 ? "GetServiceHandle" : "RegisterService", name);
                     if (header == 0x00050100)
                         pending_service[{pid, tls}] = name;
@@ -418,9 +809,18 @@ void ARM_CPU::und()
 void ARM_CPU::int_check()
 {
     //printf("[ARM%d] Interrupt check\n", id);
+#ifdef BLOSSOM_HAS_JIT
+    if (in_jit)
+    {
+        //Registers live in the JIT right now; take the interrupt once Jit::Run returns
+        jit->request_exit();
+        return;
+    }
+#endif
     if (!CPSR.irq_disable)
     {
-        printf("[ARM%d] Interrupt!\n", id);
+        if (trace_svc_lines())
+            printf("[ARM%d] Interrupt!\n", id);
         uint32_t value = CPSR.get();
         SPSR[PSR_IRQ].set(value);
 
@@ -688,9 +1088,10 @@ uint8_t ARM_CPU::read8(uint32_t addr)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
-    if (id == 9)
-        return e->arm9_read8(addr);
-    return e->arm11_read8(id - 11, addr);
+    uint8_t value = (id == 9) ? e->arm9_read8(addr) : e->arm11_read8(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 8, addr, value);
+    return value;
 }
 
 uint16_t ARM_CPU::read16(uint32_t addr)
@@ -719,9 +1120,10 @@ uint16_t ARM_CPU::read16(uint32_t addr)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
-    if (id == 9)
-        return e->arm9_read16(addr);
-    return e->arm11_read16(id - 11, addr);
+    uint16_t value = (id == 9) ? e->arm9_read16(addr) : e->arm11_read16(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 16, addr, value);
+    return value;
 }
 
 uint32_t ARM_CPU::read32(uint32_t addr)
@@ -758,9 +1160,10 @@ uint32_t ARM_CPU::read32(uint32_t addr)
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
 
-    if (id == 9)
-        return e->arm9_read32(addr);
-    return e->arm11_read32(id - 11, addr);
+    uint32_t value = (id == 9) ? e->arm9_read32(addr) : e->arm11_read32(id - 11, addr);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'R', 32, addr, value);
+    return value;
 }
 
 uint64_t ARM_CPU::read64(uint32_t addr)
@@ -772,6 +1175,8 @@ uint64_t ARM_CPU::read64(uint32_t addr)
 
 void ARM_CPU::write8(uint32_t addr, uint8_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 8, addr, value);
     uint64_t mem = (uint64_t)tlb_map[addr / 4096];
     if (!(mem & (1ULL << 61ULL)))
     {
@@ -790,6 +1195,8 @@ void ARM_CPU::write8(uint32_t addr, uint8_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 8, addr, value);
     if (id == 9)
         e->arm9_write8(addr, value);
     else
@@ -798,6 +1205,8 @@ void ARM_CPU::write8(uint32_t addr, uint8_t value)
 
 void ARM_CPU::write16(uint32_t addr, uint16_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 16, addr, value);
     if (id == 9 && (addr & 0x1))
         EmuException::die("[ARM9] Unaligned write16 $%08X: $%04X", addr, value);
     if ((addr & 0xFFF) > 0xFFE)
@@ -820,6 +1229,8 @@ void ARM_CPU::write16(uint32_t addr, uint16_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 16, addr, value);
     if (id == 9)
         e->arm9_write16(addr, value);
     else
@@ -828,6 +1239,8 @@ void ARM_CPU::write16(uint32_t addr, uint16_t value)
 
 void ARM_CPU::write32(uint32_t addr, uint32_t value)
 {
+    if (id != 9 && trace_writes_enabled())
+        trace_mmio(id, 'w', 32, addr, value);
     if (id == 9 && (addr & 0x3))
         EmuException::die("[ARM9] Unaligned write32 $%08X: $%08X", addr, value);
     if ((addr & 0xFFF) > 0xFFC)
@@ -873,6 +1286,8 @@ void ARM_CPU::write32(uint32_t addr, uint32_t value)
     }
     else
         addr = (mem & 0xFFFFF000) + (addr & 0xFFF);
+    if (id != 9 && trace_mmio_enabled())
+        trace_mmio(id, 'W', 32, addr, value);
     if (id == 9)
         e->arm9_write32(addr, value);
     else
@@ -1371,10 +1786,20 @@ void ARM_CPU::mcr(int coprocessor_id, int operation_mode,
     switch (coprocessor_id)
     {
         case 15:
+        {
             cp15->mcr(operation_mode, CP_reg, coprocessor_info, coprocessor_operand, value);
 
+            uint8_t** old_map = tlb_map;
             tlb_map = cp15->get_tlb_mapping();
+#ifdef BLOSSOM_HAS_JIT
+            if (jit)
+                jit->on_cp15_write((CP_reg << 8) | (coprocessor_operand << 4) | coprocessor_info, value,
+                                   old_map != tlb_map);
+#else
+            (void)old_map;
+#endif
             break;
+        }
     }
 }
 

@@ -1,7 +1,11 @@
+#include "common/profiler.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <set>
+#include <utility>
 #include "core/arm11/gpu.hpp"
 #include "core/arm11/signextend.hpp"
 #include "core/arm11/mpcore_pmr.hpp"
@@ -99,6 +103,7 @@ void GPU::reset(uint8_t* vram)
     cur_cmdlist_ptr = 0;
     cur_cmdlist_size = 0;
     cmd_engine_busy = false;
+    cmdlist_jumped = false;
 
     memset(&framebuffers, 0, sizeof(framebuffers));
     memset(memfill, 0, sizeof(memfill));
@@ -106,6 +111,7 @@ void GPU::reset(uint8_t* vram)
     memset(bottom_screen, 0, 240 * 320 * 4);
 
     lcd_initialized = false;
+    memset(&stats, 0, sizeof(stats));
 
     framebuffers[0].left_addr_a = 0x18000000;
     framebuffers[1].left_addr_a = 0x18000000;
@@ -114,13 +120,79 @@ void GPU::reset(uint8_t* vram)
     memset(ctx.texcomb_alpha_buffer_update, 0, sizeof(ctx.texcomb_alpha_buffer_update));
 }
 
+bool GPU::trace_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_TRACE_GPU");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
+//BLOSSOM_NO_FILL=1 shows the framebuffers even while the LCD color fill ("force black") is on or
+//the LCD init bit was never set, to see what the GPU has drawn while the guest keeps the screens black.
+static bool ignore_screenfill()
+{
+    static const bool enabled = [] {
+        const char* env = getenv("BLOSSOM_NO_FILL");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
+void GPU::note_unknown(char kind, uint32_t addr, uint32_t value)
+{
+    if (!trace_enabled())
+        return;
+    //Only the first access to each address (per kind) is printed, so polling loops stay quiet
+    static std::set<std::pair<char, uint32_t>> seen;
+    if (seen.size() > 4096 || !seen.insert({kind, addr}).second)
+        return;
+    fprintf(stderr, "[GPUTRACE] unhandled %c $%08X = $%08X\n", kind, addr, value);
+}
+
+void GPU::print_debug_stats(int frame)
+{
+    if (!trace_enabled() || frame % 60)
+        return;
+    fprintf(stderr, "[GPUTRACE] frame %d: cmdlists %llu (%llu words, %llu draws, %llu finalize) "
+            "ppf %llu memfill %llu/%llu | fb0 sel %llu addr %llu fill %llu (%s $%06X) "
+            "fb1 sel %llu addr %llu fill %llu (%s $%06X) lcd_init %d\n", frame,
+            (unsigned long long)stats.cmdlists, (unsigned long long)stats.cmd_words,
+            (unsigned long long)stats.draws, (unsigned long long)stats.finalize,
+            (unsigned long long)stats.ppf, (unsigned long long)stats.memfill[0],
+            (unsigned long long)stats.memfill[1],
+            (unsigned long long)stats.fb_select[0], (unsigned long long)stats.fb_addr[0],
+            (unsigned long long)stats.fill_writes[0], framebuffers[0].screenfill_enabled ? "on" : "off",
+            framebuffers[0].screenfill_color,
+            (unsigned long long)stats.fb_select[1], (unsigned long long)stats.fb_addr[1],
+            (unsigned long long)stats.fill_writes[1], framebuffers[1].screenfill_enabled ? "on" : "off",
+            framebuffers[1].screenfill_color, lcd_initialized);
+    for (int i = 0; i < 2; i++)
+    {
+        FrameBuffer& fb = framebuffers[i];
+        fprintf(stderr, "[GPUTRACE]   fb%d: A $%08X B $%08X sel %d fmt %d stride %d\n", i,
+                fb.left_addr_a, fb.left_addr_b, fb.buffer_select, fb.color_format, fb.stride);
+    }
+    fprintf(stderr, "[GPUTRACE]   irq raised/acked/no-target/masked:");
+    static const char* names[] = {"PSC0", "PSC1", "VBL0", "VBL1", "PPF", "P3D"};
+    for (int id = 0x28; id <= 0x2D; id++)
+        fprintf(stderr, " %s %llu/%llu/%llu/%llu", names[id - 0x28],
+                (unsigned long long)pmr->irq_raised[id], (unsigned long long)pmr->irq_acked[id],
+                (unsigned long long)pmr->irq_no_target[id], (unsigned long long)pmr->irq_masked[id]);
+    fprintf(stderr, " DSP %llu/%llu\n", (unsigned long long)pmr->irq_raised[0x4A],
+            (unsigned long long)pmr->irq_acked[0x4A]);
+}
+
 void GPU::render_frame()
 {
+    Profiler::Scope prof_scope(Profiler::GPU_DISPLAY);
+    const bool force = ignore_screenfill();
     for (int y = 0; y < 400; y++)
     {
         for (int x = 0; x < 240; x++)
         {
-            if (!framebuffers[0].screenfill_enabled && lcd_initialized)
+            if (force || (!framebuffers[0].screenfill_enabled && lcd_initialized))
                 render_fb_pixel(top_screen, 0, x, y);
             else
                 *(uint32_t*)&top_screen[(x + (y * 240)) * 4] = 0xFF000000 | framebuffers[0].screenfill_color;
@@ -131,7 +203,7 @@ void GPU::render_frame()
     {
         for (int x = 0; x < 240; x++)
         {
-            if (!framebuffers[1].screenfill_enabled && lcd_initialized)
+            if (force || (!framebuffers[1].screenfill_enabled && lcd_initialized))
                 render_fb_pixel(bottom_screen, 1, x, y);
             else
                 *(uint32_t*)&bottom_screen[(x + (y * 240)) * 4] = 0xFF000000 | framebuffers[1].screenfill_color;
@@ -207,6 +279,7 @@ uint32_t GPU::get_swizzled_tile_addr(uint32_t base, uint32_t width, uint32_t x, 
 
 void GPU::do_transfer_engine_dma(uint64_t param)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_TRANSFER);
     if (dma.flags & (1 << 3))
     {
         printf("[GPU] Doing TexCopy\n");
@@ -406,6 +479,7 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                 input_y++;
         }
     }
+    stats.ppf++;
     pmr->assert_hw_irq(0x2C);
     dma.busy = false;
     dma.finished = true;
@@ -420,15 +494,22 @@ void GPU::start_command_engine_dma(int index)
 
 void GPU::do_command_engine_dma(uint64_t index)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_CMDLIST);
     cur_cmdlist_ptr = ctx.cmd_engine[index].input_addr;
     cur_cmdlist_size = ctx.cmd_engine[index].size;
 
     //Set busy to false here, because the command list may trigger another command list DMA.
     cmd_engine_busy = false;
+    cmdlist_jumped = false;
+    stats.cmdlists++;
+    stats.cmd_words += cur_cmdlist_size;
     printf("[GPU] Doing command engine DMA\n");
     printf("[GPU] Addr: $%08X Words: $%08X\n", cur_cmdlist_ptr, cur_cmdlist_size);
     //NOTE: Here, size is in units of words
-    while (cur_cmdlist_size)
+    //The size is in words and every command takes at least two. A size that runs out in the middle
+    //of a command ends the list; counting down an unsigned size used to wrap around to 4G words
+    //and run whatever followed in memory (and schedule its DMAs) until memory ran out.
+    while (cur_cmdlist_size >= 2 && !cmdlist_jumped)
     {
         uint32_t param = e->arm11_read32(0, cur_cmdlist_ptr);
         uint32_t cmd_header = e->arm11_read32(0, cur_cmdlist_ptr + 4);
@@ -441,6 +522,14 @@ void GPU::do_command_engine_dma(uint64_t index)
         bool consecutive_writes = cmd_header >> 31;
 
         uint32_t extra_params[256];
+
+        if ((uint32_t)(extra_param_count + (extra_param_count & 0x1)) > cur_cmdlist_size)
+        {
+            printf("[GPU] Command list ends inside a command ($%04X, %d extra words, %u left)\n",
+                   cmd_id, extra_param_count, cur_cmdlist_size);
+            cur_cmdlist_size = 0;
+            break;
+        }
 
         for (unsigned int i = 0; i < extra_param_count; i++)
         {
@@ -458,7 +547,7 @@ void GPU::do_command_engine_dma(uint64_t index)
 
         write_cmd_register(cmd_id, param, param_mask);
 
-        for (unsigned int i = 0; i < extra_param_count; i++)
+        for (unsigned int i = 0; i < extra_param_count && !cmdlist_jumped; i++)
         {
             if (consecutive_writes)
                 cmd_id++;
@@ -470,6 +559,7 @@ void GPU::do_command_engine_dma(uint64_t index)
 
 void GPU::do_memfill(int index)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_MEMFILL);
     //TODO: Is the end region inclusive or exclusive? This code assumes exclusive
     printf("[GPU] Do memfill%d\n", index);
     printf("Start: $%08X End: $%08X Value: $%08X Width: %d\n",
@@ -498,6 +588,7 @@ void GPU::do_memfill(int index)
     }
     memfill[index].finished = true;
     memfill[index].busy = false;
+    stats.memfill[index & 1]++;
 
     //Memfill complete interrupt
     pmr->assert_hw_irq(0x28 + index);
@@ -687,6 +778,7 @@ void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
     {
         case 0x010:
             //End of command list interrupt
+            stats.finalize++;
             pmr->assert_hw_irq(0x2D);
             break;
         case 0x040:
@@ -919,6 +1011,8 @@ void GPU::write_cmd_register(int reg, uint32_t param, uint8_t mask)
             break;
         case 0x23C:
         case 0x23D:
+            //A kick inside a command list is a jump: the rest of the current list is not run
+            cmdlist_jumped = true;
             start_command_engine_dma(reg - 0x23C);
             break;
         case 0x242:
@@ -1059,6 +1153,7 @@ void GPU::input_float_uniform(ShaderUnit &sh, uint32_t param)
 
 void GPU::draw_vtx_array(bool is_indexed)
 {
+    stats.draws++;
     printf("[GPU] DRAW_VTX_ARRAY (indexed: %d)\n", is_indexed);
     uint32_t index_base = ctx.vtx_buffer_base + ctx.index_buffer_offs;
     uint32_t index_offs = 0;
@@ -1085,6 +1180,8 @@ void GPU::draw_vtx_array(bool is_indexed)
             index = i + ctx.vtx_offset;
 
         //Initialize variable input attributes
+        {
+        Profiler::Scope fetch_scope(Profiler::GPU_VTX_FETCH);
         int attr = 0;
         int buffer = 0;
         while (attr < ctx.total_vtx_attrs)
@@ -1172,6 +1269,7 @@ void GPU::draw_vtx_array(bool is_indexed)
             }
             else
                 attr++;
+        }
         }
 
         input_vsh_vtx();
@@ -1272,6 +1370,7 @@ void GPU::map_sh_output_to_vtx(ShaderUnit &sh, Vertex &v)
 
 void GPU::submit_vtx(Vertex& v, bool winding)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_PRIM);
     //Add vertex to the queue
     ctx.vertex_queue[ctx.submitted_vertices] = v;
     ctx.submitted_vertices++;
@@ -1501,6 +1600,7 @@ bool GPU::get_fill_rule_bias(Vertex &vtx, Vertex &line1, Vertex &line2)
 
 void GPU::rasterize_tri(Vertex &v0, Vertex &v1, Vertex &v2)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     //The triangle rasterization code uses an approach with barycentric coordinates
     //Clear explanation can be read below:
     //https://fgiesen.wordpress.com/2013/02/06/the-barycentric-conspirac/
@@ -2995,6 +3095,7 @@ void GPU::update_stencil(uint32_t addr, uint8_t old, uint8_t ref, uint8_t func)
 
 void GPU::exec_shader(ShaderUnit& sh)
 {
+    Profiler::Scope prof_scope(Profiler::GPU_SHADER);
     //Prepare input registers
     for (int i = 0; i < sh.total_inputs; i++)
     {
@@ -3922,6 +4023,7 @@ uint32_t GPU::read32(uint32_t addr)
             return cmd_engine_busy;
     }
     printf("[GPU] Unrecognized read32 $%08X\n", addr);
+    note_unknown('r', 0x10400000 | addr, 0);
     return 0;
 }
 
@@ -4034,6 +4136,7 @@ void GPU::write32(uint32_t addr, uint32_t value)
             break;
         default:
             printf("[GPU] Unrecognized write32 $%08X: $%08X\n", addr, value);
+            note_unknown('w', 0x10400000 | addr, value);
     }
 }
 
@@ -4059,6 +4162,7 @@ uint32_t GPU::read32_fb(int index, uint32_t addr)
             return fb->right_addr_b;
         default:
             printf("[GPU] Unrecognized read32 fb%d addr $%08X\n", index, addr);
+            note_unknown('r', 0x10400400 + index * 0x100 + addr, 0);
             return 0;
     }
 }
@@ -4072,10 +4176,12 @@ void GPU::write32_fb(int index, uint32_t addr, uint32_t value)
         case 0x68:
             printf("[GPU] Write fb%d left addr A: $%08X\n", index, value);
             fb->left_addr_a = value;
+            stats.fb_addr[index]++;
             return;
         case 0x6C:
             printf("[GPU] Write fb%d left addr B: $%08X\n", index, value);
             fb->left_addr_b = value;
+            stats.fb_addr[index]++;
             return;
         case 0x70:
             printf("[GPU] Write fb%d color format: $%08X\n", index, value);
@@ -4084,6 +4190,7 @@ void GPU::write32_fb(int index, uint32_t addr, uint32_t value)
         case 0x78:
             printf("[GPU] Write fb%d buffer select: $%08X\n", index, value);
             fb->buffer_select = value & 0x1;
+            stats.fb_select[index]++;
             return;
         case 0x90:
             printf("[GPU] Write fb%d stride: $%08X\n", index, value);
@@ -4099,6 +4206,7 @@ void GPU::write32_fb(int index, uint32_t addr, uint32_t value)
             return;
         default:
             printf("[GPU] Unrecognized write32 fb%d addr $%08X: $%08X\n", index, addr, value);
+            note_unknown('w', 0x10400400 + index * 0x100 + addr, value);
     }
 }
 
@@ -4117,9 +4225,20 @@ void GPU::set_lcd_init(bool init)
     lcd_initialized = init;
 }
 
+uint32_t GPU::get_screenfill(int index)
+{
+    return (framebuffers[index].screenfill_enabled << 24) | framebuffers[index].screenfill_color;
+}
+
+bool GPU::get_lcd_init()
+{
+    return lcd_initialized;
+}
+
 void GPU::set_screenfill(int index, uint32_t value)
 {
     printf("[GPU] Set screenfill%d: $%08X\n", index, value);
     framebuffers[index].screenfill_color = value & 0xFFFFFF;
     framebuffers[index].screenfill_enabled = (value >> 24) & 0x1;
+    stats.fill_writes[index]++;
 }

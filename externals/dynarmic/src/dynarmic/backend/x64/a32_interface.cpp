@@ -1,0 +1,439 @@
+/* This file is part of the dynarmic project.
+ * Copyright (c) 2016 MerryMage
+ * SPDX-License-Identifier: 0BSD
+ */
+
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <mutex>
+
+#include <boost/icl/interval_set.hpp>
+#include <fmt/format.h>
+#include <mcl/assert.hpp>
+#include <mcl/bit_cast.hpp>
+#include <mcl/scope_exit.hpp>
+#include <mcl/stdint.hpp>
+
+#include "dynarmic/backend/x64/a32_emit_x64.h"
+#include "dynarmic/backend/x64/a32_jitstate.h"
+#include "dynarmic/backend/x64/block_of_code.h"
+#include "dynarmic/backend/x64/callback.h"
+#include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/jitstate_info.h"
+#include "dynarmic/common/atomic.h"
+#include "dynarmic/common/x64_disassemble.h"
+#include "dynarmic/frontend/A32/translate/a32_translate.h"
+#include "dynarmic/interface/A32/a32.h"
+#include "dynarmic/ir/basic_block.h"
+#include "dynarmic/ir/location_descriptor.h"
+#include "dynarmic/ir/opt/passes.h"
+
+namespace Dynarmic::A32 {
+
+void (*compile_hook)(bool entering) = nullptr;
+CompileProgress compile_progress;
+
+const char* CompileStageName(std::uint32_t stage) {
+    static const char* const names[] = {"idle", "translate", "polyfill", "naming", "get/set elim", "dead code",
+                                        "const prop", "identity removal", "verification", "emit"};
+    return stage < std::size(names) ? names[stage] : "?";
+}
+
+namespace {
+// BLOSSOM_JIT_DUMP=<lo>-<hi> (hex): print the IR of every block starting in that range after each
+// compile stage, so a compile that never ends shows the last stage it finished.
+struct DumpRange {
+    std::uint32_t lo = 1, hi = 0;
+    DumpRange() {
+        if (const char* env = std::getenv("BLOSSOM_JIT_DUMP")) {
+            char* end = nullptr;
+            lo = static_cast<std::uint32_t>(std::strtoul(env, &end, 16));
+            hi = (end && *end == '-') ? static_cast<std::uint32_t>(std::strtoul(end + 1, nullptr, 16)) : lo;
+        }
+    }
+};
+const DumpRange dump_range;
+}  // namespace
+
+using namespace Backend::X64;
+
+static RunCodeCallbacks GenRunCodeCallbacks(A32::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A32::UserConfig& conf) {
+    return RunCodeCallbacks{
+        std::make_unique<ArgCallback>(LookupBlock, reinterpret_cast<u64>(arg)),
+        std::make_unique<ArgCallback>(Devirtualize<&A32::UserCallbacks::AddTicks>(cb)),
+        std::make_unique<ArgCallback>(Devirtualize<&A32::UserCallbacks::GetTicksRemaining>(cb)),
+        conf.enable_cycle_counting,
+    };
+}
+
+static std::function<void(BlockOfCode&)> GenRCP(const A32::UserConfig& conf) {
+    return [conf](BlockOfCode& code) {
+        if (conf.page_table) {
+            code.mov(code.r14, mcl::bit_cast<u64>(conf.page_table));
+        }
+        if (conf.fastmem_pointer) {
+            code.mov(code.r13, *conf.fastmem_pointer);
+        }
+    };
+}
+
+static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code) {
+    return Optimization::PolyfillOptions{
+        .sha256 = !code.HasHostFeature(HostFeature::SHA),
+        .vector_multiply_widen = true,
+    };
+}
+
+struct Jit::Impl {
+    Impl(Jit* jit, A32::UserConfig conf)
+            : block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, this, conf), JitStateInfo{jit_state}, conf.code_cache_size, GenRCP(conf))
+            , emitter(block_of_code, conf, jit)
+            , polyfill_options(GenPolyfillOptions(block_of_code))
+            , conf(std::move(conf))
+            , jit_interface(jit) {}
+
+    ~Impl() = default;
+
+    HaltReason Run() {
+        ASSERT(!jit_interface->is_executing);
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+
+        jit_interface->is_executing = true;
+        SCOPE_EXIT {
+            jit_interface->is_executing = false;
+        };
+
+        const CodePtr current_codeptr = [this] {
+            // RSB optimization
+            const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A32JitState::RSBPtrMask;
+            if (jit_state.GetUniqueHash() == jit_state.rsb_location_descriptors[new_rsb_ptr]) {
+                jit_state.rsb_ptr = new_rsb_ptr;
+                return reinterpret_cast<CodePtr>(jit_state.rsb_codeptrs[new_rsb_ptr]);
+            }
+
+            return GetCurrentBlock();
+        }();
+
+        const HaltReason hr = block_of_code.RunCode(&jit_state, current_codeptr);
+
+        PerformRequestedCacheInvalidation(hr);
+
+        return hr;
+    }
+
+    HaltReason Step() {
+        ASSERT(!jit_interface->is_executing);
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+
+        jit_interface->is_executing = true;
+        SCOPE_EXIT {
+            jit_interface->is_executing = false;
+        };
+
+        const HaltReason hr = block_of_code.StepCode(&jit_state, GetCurrentSingleStep());
+
+        PerformRequestedCacheInvalidation(hr);
+
+        return hr;
+    }
+
+    void ClearCache() {
+        std::unique_lock lock{invalidation_mutex};
+        invalidate_entire_cache = true;
+        HaltExecution(HaltReason::CacheInvalidation);
+    }
+
+    void InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
+        std::unique_lock lock{invalidation_mutex};
+        invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        HaltExecution(HaltReason::CacheInvalidation);
+    }
+
+    // Blossom: unlinks the blocks right away, so the code still running (the rest of the current
+    // block, its links, the fast dispatch table and the RSB) can no longer reach them. Safe from a
+    // memory callback: the old code stays in the code buffer until the next full clear.
+    void InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length) {
+        std::unique_lock lock{invalidation_mutex};
+        boost::icl::interval_set<u32> ranges;
+        ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        jit_state.ResetRSB();
+        emitter.InvalidateCacheRanges(ranges);
+    }
+
+    void Reset() {
+        ASSERT(!jit_interface->is_executing);
+        jit_state = {};
+    }
+
+    void HaltExecution(HaltReason hr) {
+        Atomic::Or(&jit_state.halt_reason, static_cast<u32>(hr));
+    }
+
+    void ClearHalt(HaltReason hr) {
+        Atomic::And(&jit_state.halt_reason, ~static_cast<u32>(hr));
+    }
+
+    void ClearExclusiveState() {
+        jit_state.exclusive_state = 0;
+    }
+
+    std::array<u32, 16>& Regs() {
+        return jit_state.Reg;
+    }
+
+    const std::array<u32, 16>& Regs() const {
+        return jit_state.Reg;
+    }
+
+    std::array<u32, 64>& ExtRegs() {
+        return jit_state.ExtReg;
+    }
+
+    const std::array<u32, 64>& ExtRegs() const {
+        return jit_state.ExtReg;
+    }
+
+    u32 Cpsr() const {
+        return jit_state.Cpsr();
+    }
+
+    void SetCpsr(u32 value) {
+        return jit_state.SetCpsr(value);
+    }
+
+    u32 Fpscr() const {
+        return jit_state.Fpscr();
+    }
+
+    void SetFpscr(u32 value) {
+        return jit_state.SetFpscr(value);
+    }
+
+    u32 Context() const {
+        return jit_state.upper_location_descriptor & A32::LocationDescriptor::CONTEXT_MASK;
+    }
+
+    void SetContext(u32 value) {
+        jit_state.upper_location_descriptor &= ~A32::LocationDescriptor::CONTEXT_MASK;
+        jit_state.upper_location_descriptor |= value & A32::LocationDescriptor::CONTEXT_MASK;
+    }
+
+    void DumpDisassembly() const {
+        const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
+        Common::DumpDisassembledX64(block_of_code.GetCodeBegin(), size);
+    }
+
+    std::vector<std::string> Disassemble() const {
+        const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
+        return Common::DisassembleX64(block_of_code.GetCodeBegin(), size);
+    }
+
+private:
+    static CodePtr GetCurrentBlockThunk(void* this_voidptr) {
+        Jit::Impl& this_ = *static_cast<Jit::Impl*>(this_voidptr);
+        return this_.GetCurrentBlock();
+    }
+
+    IR::LocationDescriptor GetCurrentLocation() const {
+        return IR::LocationDescriptor{jit_state.GetUniqueHash()};
+    }
+
+    CodePtr GetCurrentBlock() {
+        return GetBasicBlock(GetCurrentLocation()).entrypoint;
+    }
+
+    CodePtr GetCurrentSingleStep() {
+        return GetBasicBlock(A32::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true)).entrypoint;
+    }
+
+    A32EmitX64::BlockDescriptor GetBasicBlock(IR::LocationDescriptor descriptor) {
+        auto block = emitter.GetBasicBlock(descriptor);
+        if (block)
+            return *block;
+
+        if (compile_hook)
+            compile_hook(true);
+        const std::uint32_t block_pc = A32::LocationDescriptor{descriptor}.PC();
+        const bool dump = block_pc >= dump_range.lo && block_pc <= dump_range.hi;
+        compile_progress.pc = block_pc;
+        compile_progress.ir_insts = 0;
+        compile_progress.stage = 1;
+        SCOPE_EXIT {
+            compile_progress.stage = 0;
+            if (compile_hook)
+                compile_hook(false);
+        };
+
+        constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+        if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
+            invalidate_entire_cache = true;
+            PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+        }
+        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+
+        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.interpret_system_instructions, conf.coprocessors[15] != nullptr, conf.max_block_instructions, conf.interpret_lo, conf.interpret_hi});
+        auto stage_done = [&](std::uint32_t next_stage) {
+            compile_progress.ir_insts = static_cast<std::uint32_t>(ir_block.Instructions().size());
+            if (dump) {
+                std::fprintf(stderr, "[JIT DUMP] $%08X after %s (%u IR instructions):\n%s\n", block_pc,
+                             CompileStageName(compile_progress.stage), compile_progress.ir_insts, IR::DumpBlock(ir_block).c_str());
+                std::fflush(stderr);
+            }
+            compile_progress.stage = next_stage;
+        };
+        stage_done(2);
+        Optimization::PolyfillPass(ir_block, polyfill_options);
+        stage_done(3);
+        Optimization::NamingPass(ir_block);
+        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+            stage_done(4);
+            Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true});
+            stage_done(5);
+            Optimization::DeadCodeElimination(ir_block);
+        }
+        if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+            stage_done(6);
+            Optimization::A32ConstantMemoryReads(ir_block, conf.callbacks);
+            Optimization::ConstantPropagation(ir_block);
+            stage_done(5);
+            Optimization::DeadCodeElimination(ir_block);
+        }
+        stage_done(7);
+        Optimization::IdentityRemovalPass(ir_block);
+        stage_done(8);
+        Optimization::VerificationPass(ir_block);
+        stage_done(9);
+        auto result = emitter.Emit(ir_block);
+        if (dump) {
+            std::fprintf(stderr, "[JIT DUMP] $%08X emitted, %zu bytes of host code\n", block_pc, result.size);
+            std::fflush(stderr);
+        }
+        return result;
+    }
+
+    void PerformRequestedCacheInvalidation(HaltReason hr) {
+        if (Has(hr, HaltReason::CacheInvalidation)) {
+            std::unique_lock lock{invalidation_mutex};
+
+            ClearHalt(HaltReason::CacheInvalidation);
+
+            if (!invalidate_entire_cache && invalid_cache_ranges.empty()) {
+                return;
+            }
+
+            jit_state.ResetRSB();
+            if (invalidate_entire_cache) {
+                block_of_code.ClearCache();
+                emitter.ClearCache();
+            } else {
+                emitter.InvalidateCacheRanges(invalid_cache_ranges);
+            }
+            invalid_cache_ranges.clear();
+            invalidate_entire_cache = false;
+        }
+    }
+
+    A32JitState jit_state;
+    BlockOfCode block_of_code;
+    A32EmitX64 emitter;
+    Optimization::PolyfillOptions polyfill_options;
+
+    const A32::UserConfig conf;
+
+    Jit* jit_interface;
+
+    // Requests made during execution to invalidate the cache are queued up here.
+    bool invalidate_entire_cache = false;
+    boost::icl::interval_set<u32> invalid_cache_ranges;
+    std::mutex invalidation_mutex;
+};
+
+Jit::Jit(UserConfig conf)
+        : impl(std::make_unique<Impl>(this, std::move(conf))) {}
+
+Jit::~Jit() = default;
+
+HaltReason Jit::Run() {
+    return impl->Run();
+}
+
+HaltReason Jit::Step() {
+    return impl->Step();
+}
+
+void Jit::ClearCache() {
+    impl->ClearCache();
+}
+
+void Jit::InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
+    impl->InvalidateCacheRange(start_address, length);
+}
+
+void Jit::InvalidateCacheRangeNow(std::uint32_t start_address, std::size_t length) {
+    impl->InvalidateCacheRangeNow(start_address, length);
+}
+
+void Jit::Reset() {
+    impl->Reset();
+}
+
+void Jit::HaltExecution(HaltReason hr) {
+    impl->HaltExecution(hr);
+}
+
+void Jit::ClearHalt(HaltReason hr) {
+    impl->ClearHalt(hr);
+}
+
+std::array<std::uint32_t, 16>& Jit::Regs() {
+    return impl->Regs();
+}
+
+const std::array<std::uint32_t, 16>& Jit::Regs() const {
+    return impl->Regs();
+}
+
+std::array<std::uint32_t, 64>& Jit::ExtRegs() {
+    return impl->ExtRegs();
+}
+
+const std::array<std::uint32_t, 64>& Jit::ExtRegs() const {
+    return impl->ExtRegs();
+}
+
+std::uint32_t Jit::Cpsr() const {
+    return impl->Cpsr();
+}
+
+void Jit::SetCpsr(std::uint32_t value) {
+    impl->SetCpsr(value);
+}
+
+std::uint32_t Jit::Fpscr() const {
+    return impl->Fpscr();
+}
+
+void Jit::SetFpscr(std::uint32_t value) {
+    impl->SetFpscr(value);
+}
+
+std::uint32_t Jit::Context() const {
+    return impl->Context();
+}
+
+void Jit::SetContext(std::uint32_t value) {
+    impl->SetContext(value);
+}
+
+void Jit::ClearExclusiveState() {
+    impl->ClearExclusiveState();
+}
+
+void Jit::DumpDisassembly() const {
+    impl->DumpDisassembly();
+}
+
+}  // namespace Dynarmic::A32

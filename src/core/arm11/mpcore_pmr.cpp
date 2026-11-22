@@ -29,6 +29,10 @@ void MPCore_PMR::reset(int core_count)
     memset(private_int_active, 0, sizeof(private_int_active));
     memset(private_int_priority, 0, sizeof(private_int_priority));
     memset(regs, 0, sizeof(regs));
+    memset(irq_raised, 0, sizeof(irq_raised));
+    memset(irq_no_target, 0, sizeof(irq_no_target));
+    memset(irq_masked, 0, sizeof(irq_masked));
+    memset(irq_acked, 0, sizeof(irq_acked));
 
     //Interrupts 0-15 are always enabled
     global_int_mask[0] = 0xFFFF;
@@ -39,6 +43,11 @@ void MPCore_PMR::assert_hw_irq(int id)
     //printf("[PMR] Set global IRQ: $%02X\n", id);
 
     uint8_t cpu_targets = global_int_targets[id - 32];
+    irq_raised[id]++;
+    if (!(cpu_targets & ((1 << core_count) - 1)))
+        irq_no_target[id]++;
+    if (!(global_int_mask[id / 32] & (1 << (id & 0x1F))))
+        irq_masked[id]++;
 
     for (int i = 0; i < core_count; i++)
     {
@@ -252,6 +261,8 @@ uint32_t MPCore_PMR::read32(int core, uint32_t addr)
             printf("[PMR%d] Acknowledge pending IRQ: $%08X\n", core, cause);
 
             int int_id = cause & 0x3FF;
+            if (int_id < 128)
+                irq_acked[int_id]++;
             private_int_pending[core][int_id / 32] &= ~(1 << (int_id & 0x1F));
             local_irq_ctrl[core].irq_cause = SPURIOUS_INT;
             local_irq_ctrl[core].cur_active_irq = cause;

@@ -1,5 +1,13 @@
+#include "common/profiler.hpp"
+#include "common/native_stack.hpp"
+#ifdef BLOSSOM_HAS_JIT
+#include <dynarmic/interface/exclusive_monitor.h>
+#endif
+#include <cstdlib>
+#include <string>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include "common/common.hpp"
 #include "core/emulator.hpp"
 
@@ -35,6 +43,7 @@ Emulator::Emulator() :
     timers(&int9, &mpcore_pmr, this),
     wifi(&cdma, &scheduler)
 {
+    Profiler::init();
     arm9_RAM = nullptr;
     axi_RAM = nullptr;
     fcram = nullptr;
@@ -45,6 +54,15 @@ Emulator::Emulator() :
 
 Emulator::~Emulator()
 {
+    watchdog_stop = true;
+    if (watchdog.joinable())
+        watchdog.join();
+
+    //The JITs reference the exclusive monitor; drop them first
+    arm9.set_jit_enabled(false);
+    for (int i = 0; i < 4; i++)
+        arm11[i].set_jit_enabled(false);
+
     delete[] arm9_RAM;
     delete[] axi_RAM;
     delete[] fcram;
@@ -196,8 +214,155 @@ void Emulator::reset(bool cold_boot)
     scheduler.set_clockrate_xtensa(XTENSA_CLOCKRATE);
 }
 
+bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
+{
+    if ((arm11_jit || arm9_jit) && !ARM_CPU::jit_available())
+    {
+        printf("[Emulator] JIT not built in, using the interpreter\n");
+        arm11_jit = arm9_jit = false;
+        set_cpu_backend(false, false);
+        return false;
+    }
+#ifdef BLOSSOM_HAS_JIT
+    if (arm11_jit && !exclusive_monitor)
+        exclusive_monitor = std::make_unique<Dynarmic::ExclusiveMonitor>(4);
+#endif
+    for (int i = 0; i < 4; i++)
+        arm11[i].set_jit_enabled(arm11_jit, exclusive_monitor.get());
+    arm9.set_jit_enabled(arm9_jit);
+    //BLOSSOM_SLICE=<quantum cycles> changes how long each core runs before the next one gets a
+    //turn (256 by default). Longer slices are faster with the JIT but break the boot9/boot11
+    //handshake, which is timing sensitive.
+    int slice = 256;
+    if (const char* env = std::getenv("BLOSSOM_SLICE"))
+        slice = atoi(env) > 0 ? atoi(env) : slice;
+    scheduler.set_max_cycles(slice);
+    printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s, slice %d\n", arm11_jit ? "JIT" : "interpreter",
+           arm9_jit ? "JIT" : "interpreter", slice);
+    return true;
+}
+
+bool Emulator::is_arm11_jit() const
+{
+    return arm11[0].is_jit_enabled();
+}
+
+bool Emulator::is_arm9_jit() const
+{
+    return arm9.is_jit_enabled();
+}
+
+void Emulator::apply_cpu_backend_env()
+{
+    const char* env = std::getenv("BLOSSOM_CPU");
+    if (!env || !env[0])
+        return;
+    std::string mode = env;
+    if (mode == "interp" || mode == "interpreter")
+        set_cpu_backend(false, false);
+    else if (mode == "jit")
+        set_cpu_backend(true, true);
+    else if (mode == "jit11")
+        set_cpu_backend(true, false);
+    else if (mode == "jit9")
+        set_cpu_backend(false, true);
+    else
+        printf("[Emulator] Unknown BLOSSOM_CPU=%s (use interp, jit, jit11 or jit9)\n", env);
+}
+
+static int64_t now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void Emulator::start_watchdog()
+{
+    if (watchdog.joinable())
+        return;
+    const char* env = getenv("BLOSSOM_WATCHDOG");
+    if (env && env[0] == '0')
+        return;
+    last_frame_end_ms = now_ms();
+    watchdog = std::thread([this] { watchdog_loop(); });
+}
+
+void Emulator::watchdog_report(const char* reason, long mb)
+{
+    //Everything here is read without locks while the emulator thread runs: good enough to see
+    //where it is stuck, not exact
+    fprintf(stderr, "[WATCHDOG] %s: frame %d, ram %ld MB, pending events %zu\n", reason, frames, mb,
+            scheduler.event_count());
+    int stack[32];
+    int n = Profiler::stack_snapshot(stack, 32);
+    fprintf(stderr, "[WATCHDOG] profiler scope (needs BLOSSOM_PROFILE=1):");
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, " %s", Profiler::bucket_name(stack[i]));
+    fprintf(stderr, "\n[WATCHDOG] PCs: arm11 $%08X%s $%08X%s | arm9 $%08X%s\n",
+            arm11[0].debug_pc(), arm11[0].is_halted() ? " halt" : "",
+            arm11[1].debug_pc(), arm11[1].is_halted() ? " halt" : "",
+            arm9.debug_pc(), arm9.is_halted() ? " halt" : "");
+    for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
+    {
+        if (!arm11[i].is_halted())
+            arm11[i].debug_report();
+    }
+    if (!arm9.is_halted())
+        arm9.debug_report();
+    fprintf(stderr, "[WATCHDOG] counters this frame:");
+    for (int i = 0; i < Profiler::COUNTER_COUNT; i++)
+        fprintf(stderr, " %llu", (unsigned long long)Profiler::counters[i]);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
+void Emulator::watchdog_loop()
+{
+    static const long max_mb = [] {
+        const char* env = getenv("BLOSSOM_MAX_RAM_MB");
+        return env ? atol(env) : 4096L;
+    }();
+    int64_t last_report = 0, last_growth_report = 0;
+    long mb_history[4] = {0, 0, 0, 0};
+    int tick = 0;
+    while (!watchdog_stop)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        long mb = Profiler::resident_mb();
+        //Memory 1 s ago: a runaway grows by hundreds of MB a second, report it while it happens
+        long mb_1s_ago = mb_history[tick % 4];
+        mb_history[tick % 4] = mb;
+        tick++;
+        int64_t now_growth = now_ms();
+        if (tick > 4 && mb - mb_1s_ago > 150 && now_growth - last_growth_report > 1000)
+        {
+            watchdog_report("memory grew by more than 150 MB in the last second", mb);
+            NativeStack::report(3, 150);
+            last_growth_report = now_growth;
+        }
+        if (max_mb > 0 && mb > max_mb)
+        {
+            watchdog_report("memory limit passed, stopping", mb);
+            NativeStack::report(2, 200);
+            //Twice, a second apart, to show what keeps running
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            watchdog_report("memory limit passed, stopping", Profiler::resident_mb());
+            fflush(stdout);
+            std::_Exit(3);
+        }
+        int64_t now = now_ms();
+        if (now - last_frame_end_ms > 10000 && now - last_report > 5000)
+        {
+            watchdog_report("frame running for more than 10 s", mb);
+            last_report = now;
+        }
+    }
+}
+
 void Emulator::run()
 {
+    start_watchdog();
+    NativeStack::set_target_thread();
     i2c.update_time();
     printf("FRAME %d\n", frames);
 
@@ -214,28 +379,103 @@ void Emulator::run()
         scheduler.calculate_cycles_to_run();
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
-
-        arm11[0].run(cycles11);
-        arm11[1].run(cycles11);
-
-        //TODO: Is it faster to always run the additional cores in Old3DS mode?
-        //Probably not, because the branch predictor should have an easy time with this
-        if (is_n3ds)
+        Profiler::counters[Profiler::SLICES]++;
+        //Memory guard: a runaway allocation inside one frame used to take the whole machine's
+        //memory before failing. BLOSSOM_MAX_RAM_MB changes the limit (4096 MB by default).
+        if ((++memory_check_counter & 0x3FFF) == 0)
         {
-            arm11[2].run(cycles11);
-            arm11[3].run(cycles11);
+            static const long max_mb = [] {
+                const char* env = getenv("BLOSSOM_MAX_RAM_MB");
+                return env ? atol(env) : 4096L;
+            }();
+            long mb = Profiler::resident_mb();
+            if (max_mb > 0 && mb > max_mb)
+                EmuException::die("[Emulator] Using %ld MB of memory (limit %ld MB) in frame %d, stopping",
+                                  mb, max_mb, frames);
+        }
+        if (cycles11 < 64)
+            Profiler::counters[Profiler::SHORT_SLICES]++;
+
+        {
+            Profiler::Scope prof_scope(Profiler::ARM11);
+            arm11[0].run(cycles11);
+            arm11[1].run(cycles11);
+
+            //TODO: Is it faster to always run the additional cores in Old3DS mode?
+            //Probably not, because the branch predictor should have an easy time with this
+            if (is_n3ds)
+            {
+                arm11[2].run(cycles11);
+                arm11[3].run(cycles11);
+            }
         }
 
-        arm9.run(cycles9);
-        timers.run(cycles11, cycles9);
-        dsp.run(cycles9);
-        dma9.process_ndma_reqs();
-        dma9.run_xdma();
-        cdma.run();
+        {
+            Profiler::Scope prof_scope(Profiler::ARM9);
+            arm9.run(cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DMA_TIMERS);
+            timers.run(cycles11, cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DSP);
+            dsp.run(cycles9);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::DMA_TIMERS);
+            dma9.process_ndma_reqs();
+            dma9.run_xdma();
+            cdma.run();
+        }
 
-        int xtensa_cycles = scheduler.get_xtensa_cycles_to_run();
-        wifi.run(xtensa_cycles);
-        scheduler.process_events();
+        {
+            Profiler::Scope prof_scope(Profiler::WIFI);
+            int xtensa_cycles = scheduler.get_xtensa_cycles_to_run();
+            wifi.run(xtensa_cycles);
+        }
+        {
+            Profiler::Scope prof_scope(Profiler::EVENTS);
+            scheduler.process_events();
+        }
+    }
+    gpu.print_debug_stats(frames);
+    ARM_CPU::print_svc_stats(frames);
+    Profiler::end_frame(frames);
+    last_frame_end_ms = now_ms();
+    if (Profiler::enabled)
+    {
+        //Where each core is at the end of the frame: a core stuck in a loop shows the same PCs
+        //frame after frame. PC is the next instruction (the interpreter's PC minus 4, or 2 in Thumb).
+        //BLOSSOM_PROFILE=2 adds the registers, cycles run and interpreter fallbacks of each core.
+        static const bool verbose = [] {
+            const char* env = getenv("BLOSSOM_PROFILE");
+            return env && atoi(env) >= 2;
+        }();
+        auto core_state = [](ARM_CPU& cpu) {
+            PSR_Flags* cpsr = cpu.get_CPSR();
+            uint64_t fallbacks, cycles;
+            cpu.take_debug_stats(fallbacks, cycles);
+            fprintf(stderr, " $%08X/%02X%s%s", cpu.get_PC() - (cpsr->thumb ? 2 : 4), cpsr->mode,
+                    cpsr->thumb ? "T" : "", cpu.is_halted() ? " halt" : "");
+            if (verbose)
+            {
+                fprintf(stderr, " [cyc %llu fb %llu cpsr $%08X", (unsigned long long)cycles,
+                        (unsigned long long)fallbacks, cpsr->get());
+                for (int r = 0; r < 15; r++)
+                    fprintf(stderr, " r%d=%08X", r, cpu.get_register(r));
+                fprintf(stderr, "]");
+            }
+        };
+        fprintf(stderr, "[CPU] frame %d: arm11", frames);
+        for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
+            core_state(arm11[i]);
+        fprintf(stderr, " | arm9");
+        core_state(arm9);
+        fprintf(stderr, "\n");
+        for (int i = 0; i < (is_n3ds ? 4 : 2); i++)
+            arm11[i].print_jit_stats();
+        arm9.print_jit_stats();
     }
     frames++;
 }
@@ -324,11 +564,16 @@ bool Emulator::mount_cartridge(std::string file_name)
     return cartridge.mount(file_name);
 }
 
-void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size)
+void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size, int core, bool thumb_entry, uint64_t cycles, int slice)
 {
     reset();
 
-    arm9_pu.add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    ARM_CPU& cpu = (core == 9) ? arm9 : arm11[0];
+    if (core == 9)
+        arm9_pu.add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    else
+        arm11_mmu[0].add_physical_mapping(fcram, 0, 1024 * 1024 * 128);
+    cpu.set_test_console(true);
 
     uint32_t e_entry = *(uint32_t*)&elf[0x18];
     uint32_t e_phoff = *(uint32_t*)&elf[0x1C];
@@ -367,13 +612,33 @@ void Emulator::load_and_run_elf(uint8_t *elf, uint64_t size)
         }
     }
 
-    arm9.jp(e_entry, true);
+    //An odd entry point (set by the test runner for Thumb-only images) starts in Thumb state
+    cpu.jp(e_entry | thumb_entry, true);
 
     //Switch to system mode
-    arm9.cps((1 << 17) | 0x1F);
-    arm9.set_register(REG_SP, e_entry);
-    //arm9.set_disassembly(true);
-    arm9.run(1024 * 1024);
+    cpu.cps((1 << 17) | 0x1F);
+    cpu.set_register(REG_SP, e_entry);
+    //cpu.set_disassembly(true);
+    //Run in slices like the real scheduler does (an exception ends the interpreter's slice early)
+    for (uint64_t done = 0; done < cycles; done += slice)
+        cpu.run(slice);
+}
+
+//The boot ROMs hand values to each other through PXI_SYNC and some last only a few instructions:
+//boot11 sends 1, sees the ARM9's 1 and sends 14 at once, and boot9 must see the 1 to go on. The
+//cores take turns in slices, so the other side only sees the register between slices. Ending the
+//writer's slice right after the write lets the other processor run and see every value. Without
+//this the handshake depended on where a slice happened to end (it broke with longer slices and
+//with JIT block linking).
+void Emulator::pxi_sync_point(bool from_arm9)
+{
+    if (from_arm9)
+        arm9.end_slice();
+    else
+    {
+        for (int i = 0; i < 4; i++)
+            arm11[i].end_slice();
+    }
 }
 
 uint8_t Emulator::arm9_read8(uint32_t addr)
@@ -634,6 +899,7 @@ void Emulator::arm9_write8(uint32_t addr, uint8_t value)
         int mask = ~(0xFF << shift);
         sync &= mask;
         pxi.write_sync9(sync | (value << shift));
+        pxi_sync_point(true);
         return;
     }
     switch (addr)
@@ -872,6 +1138,7 @@ void Emulator::arm9_write32(uint32_t addr, uint32_t value)
             return;
         case 0x10008000:
             pxi.write_sync9(value);
+            pxi_sync_point(true);
             return;
         case 0x10008004:
             pxi.write_cnt9(value & 0xFFFF);
@@ -888,6 +1155,13 @@ void Emulator::arm9_write32(uint32_t addr, uint32_t value)
 
 uint8_t Emulator::arm11_read8(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint8_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x10140000 && addr < 0x10140010)
         return dsp_mem_config[addr & 0xF];
     if (addr >= 0x10144000 && addr < 0x10145000)
@@ -944,6 +1218,13 @@ uint8_t Emulator::arm11_read8(int core, uint32_t addr)
 
 uint16_t Emulator::arm11_read16(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint16_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x10103000 && addr < 0x10104000)
     {
         printf("[CSND] Unrecognized read16 $%08X\n", addr);
@@ -1006,6 +1287,13 @@ uint16_t Emulator::arm11_read16(int core, uint32_t addr)
 
 uint32_t Emulator::arm11_read32(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint32_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x17E00000 && addr < 0x17E02000)
     {
         //Bit of a hack: Since we do not handle accurate ARM11 timings, we shave off a cycle for MPR reads.
@@ -1039,7 +1327,14 @@ uint32_t Emulator::arm11_read32(int core, uint32_t addr)
         return hash.read32(addr);
     if (addr >= 0x10202000 && addr < 0x10203000)
     {
+        if (addr == 0x10202014)
+            return gpu.get_lcd_init();
+        if (addr == 0x10202204)
+            return gpu.get_screenfill(0);
+        if (addr == 0x10202A04)
+            return gpu.get_screenfill(1);
         printf("[LCD] Unrecognized read $%08X\n", addr);
+        gpu.note_lcd_access('r', addr, 0);
         return 0;
     }
     if (addr >= 0x10142800 && addr < 0x10144000)
@@ -1168,12 +1463,14 @@ void Emulator::arm11_write8(int core, uint32_t addr, uint8_t value)
         {
             uint32_t sync = pxi.read_sync11() & 0xFFFF00FF;
             pxi.write_sync11(sync | (value << 8));
+            pxi_sync_point(false);
         }
             return;
         case 0x10163003:
         {
             uint32_t sync = pxi.read_sync11() & 0x00FFFFFF;
             pxi.write_sync11(sync | (value << 24));
+            pxi_sync_point(false);
         }
             return;
     }
@@ -1342,6 +1639,7 @@ void Emulator::arm11_write32(int core, uint32_t addr, uint32_t value)
             return;
         }
         printf("[LCD] Unrecognized write32 $%08X: $%08X\n", addr, value);
+        gpu.note_lcd_access('w', addr, value);
         return;
     }
     if (addr >= 0x1020F000 && addr < 0x10210000)
@@ -1401,6 +1699,7 @@ void Emulator::arm11_write32(int core, uint32_t addr, uint32_t value)
             return;
         case 0x10163000:
             pxi.write_sync11(value);
+            pxi_sync_point(false);
             return;
         case 0x10163004:
             pxi.write_cnt11(value & 0xFFFF);

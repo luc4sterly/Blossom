@@ -42,6 +42,9 @@ class MPCore_PMR
         void check_if_can_assert_irq(int core);
         void set_int_signal(int core, bool irq);
     public:
+        //Debug counters for BLOSSOM_TRACE_GPU: per global IRQ, how many were raised, and how many
+        //of those were dropped (no target core) or masked in the distributor at the time.
+        uint64_t irq_raised[128], irq_no_target[128], irq_masked[128], irq_acked[128];
         constexpr static uint32_t SPURIOUS_INT = 0x3FF;
         MPCore_PMR(ARM_CPU arm11[4], Timers* timers);
 

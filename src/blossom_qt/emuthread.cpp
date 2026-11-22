@@ -31,6 +31,7 @@ void EmuThread::run()
             printf("[EmuThread] Error occurred, stopping emulation...\n");
             printf("%s\n", error.what());
             e.print_state();
+            fflush(stdout);
             emit emu_error(error.what());
             quit = true;
             break;
@@ -78,6 +79,17 @@ bool EmuThread::boot_emulator(QString cart_path)
 
     e.load_roms(boot9_rom, boot11_rom);
     e.set_dev_unsigned(Settings::dev_unsigned);
+
+    //CPU backend: saved setting, then --cpu, then BLOSSOM_CPU
+    QString backend = Settings::cpu_backend_override.isEmpty() ? Settings::cpu_backend
+                                                              : Settings::cpu_backend_override;
+    if (backend == "interp")
+        e.set_cpu_backend(false, false);
+    else if (backend == "jit11")
+        e.set_cpu_backend(true, false);
+    else
+        e.set_cpu_backend(true, true);
+    e.apply_cpu_backend_env();
 
     if (!e.mount_nand(Settings::nand_path.toStdString()))
     {
