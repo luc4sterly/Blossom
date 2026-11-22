@@ -105,6 +105,14 @@ class VulkanRasterizer
         // Ends the session, waits for the GPU and copies the target back (any pointer can be null).
         void end(uint32_t* color, float* depth, uint8_t* stencil);
 
+        // end() in three steps, so the wait and copy-out can run on another thread:
+        // end_submit() records the readback and submits; end_wait() waits for the GPU and copies
+        // out (it touches nothing else, so another thread may call it); end_complete() resets the
+        // per-submit state and must come before any other call.
+        void end_submit();
+        void end_wait(uint32_t* color, float* depth, uint8_t* stencil);
+        void end_complete();
+
         struct Impl;
     private:
         explicit VulkanRasterizer(std::unique_ptr<Impl> impl);

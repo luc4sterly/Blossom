@@ -7,6 +7,10 @@
 // target) writes them back in the PICA's tiled formats.
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -141,7 +145,63 @@ struct GPU::HwRenderer
     uint64_t tex_hashed = 0, tex_hash_hits = 0;
     //With BLOSSOM_TRACE_GPU: where gpu-raster goes, in ms since the last report
     bool timing = false;
-    double t_poly = 0, t_begin = 0, t_hash = 0, t_wait = 0, t_writeback = 0;
+    double t_poly = 0, t_begin = 0, t_hash = 0, t_wait = 0, t_writeback = 0, t_sync = 0;
+
+    //The end of a session (waiting for the GPU, reading back and writing to emulated memory)
+    //runs on a worker thread while emulation goes on. hw_sync() waits for it; it is called
+    //before anything that uses the GPU or reads the render targets (the next session, display
+    //transfers, memory fills, the LCD). BLOSSOM_VK_ASYNC=0 does it all inline.
+    bool async = true;
+    bool in_flight = false;
+    std::thread worker;
+    std::mutex m;
+    std::condition_variable cv;
+    std::function<void()> job;
+    bool job_done = true, stop = false;
+
+    void start_worker()
+    {
+        worker = std::thread([this] {
+            std::unique_lock<std::mutex> lock(m);
+            while (true)
+            {
+                cv.wait(lock, [this] { return stop || job; });
+                if (stop)
+                    return;
+                std::function<void()> j = std::move(job);
+                job = nullptr;
+                lock.unlock();
+                j();
+                lock.lock();
+                job_done = true;
+                cv.notify_all();
+            }
+        });
+    }
+    void post(std::function<void()> j)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        job = std::move(j);
+        job_done = false;
+        cv.notify_all();
+    }
+    void wait_job()
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [this] { return job_done; });
+    }
+    ~HwRenderer()
+    {
+        if (worker.joinable())
+        {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                stop = true;
+                cv.notify_all();
+            }
+            worker.join();
+        }
+    }
     uint64_t hashed_bytes = 0, pixels = 0;
 };
 
@@ -218,6 +278,7 @@ void GPU::hw_shutdown()
     if (!hw)
         return;
     hw_end_session();
+    hw_sync();
     delete hw;
     hw = nullptr;
 }
@@ -250,6 +311,12 @@ bool GPU::set_renderer(const char* name)
     hw = new HwRenderer();
     hw->vk = std::move(vk);
     hw->timing = trace_enabled();
+    {
+        const char* env = getenv("BLOSSOM_VK_ASYNC");
+        hw->async = !(env && env[0] == '0');
+    }
+    if (hw->async)
+        hw->start_worker();
     return true;
 #else
     fprintf(stderr, "[GPU] This build has no Vulkan renderer (ENABLE_VULKAN=OFF); using software\n");
@@ -305,15 +372,48 @@ void GPU::hw_end_session()
     Profiler::Scope prof_scope(Profiler::GPU_RASTER);
     h.session = false;
     h.tex_hashes.clear();
-    {
-        HwTimer t(h.timing, h.t_wait);
-        h.vk->end(h.color_written ? h.color.data() : nullptr, h.depth_written ? h.depth.data() : nullptr,
-                  h.depth_written ? h.stencil.data() : nullptr);
-    }
-    HwTimer t(h.timing, h.t_writeback);
+    h.vk->end_submit();
     //Whole buffers in VRAM/FCRAM are written through one pointer instead of a lookup per pixel
     uint8_t* color_mem = e->phys_ptr(h.color_addr, h.color_len);
     uint8_t* depth_mem = e->phys_ptr(h.depth_addr, h.depth_len);
+    //The worker can only write through pointers: the bus (hw_write_fb) is not thread safe
+    bool can_async = h.async && (color_mem || !h.color_written) && (depth_mem || !h.depth_written);
+    h.in_flight = true;
+    if (can_async)
+        h.post([this, color_mem, depth_mem] { hw_finish_session(color_mem, depth_mem); });
+    else
+    {
+        hw_finish_session(color_mem, depth_mem);
+        hw_sync();
+    }
+}
+
+void GPU::hw_sync()
+{
+    if (!hw || !hw->in_flight)
+        return;
+    HwRenderer& h = *hw;
+    {
+        HwTimer t(h.timing, h.t_sync);
+        if (h.async)
+            h.wait_job();
+    }
+    h.vk->end_complete();
+    h.in_flight = false;
+}
+
+//Waits for the GPU and writes the session's target back to emulated memory. Runs on the worker
+//thread when async: it only touches the target buffers, h.color/depth/stencil and h.shadows,
+//which the emulation thread leaves alone until hw_sync().
+void GPU::hw_finish_session(uint8_t* color_mem, uint8_t* depth_mem)
+{
+    HwRenderer& h = *hw;
+    {
+        HwTimer t(h.timing, h.t_wait);
+        h.vk->end_wait(h.color_written ? h.color.data() : nullptr, h.depth_written ? h.depth.data() : nullptr,
+                       h.depth_written ? h.stencil.data() : nullptr);
+    }
+    HwTimer t(h.timing, h.t_writeback);
     auto write_fb = [&](uint8_t* mem, uint32_t base, uint32_t addr, uint32_t v, int size) {
         if (mem)
             store_le(mem + (addr - base), v, size);
@@ -410,6 +510,7 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
     HwRenderer& h = *hw;
     HwTimer poly_timer(h.timing, h.t_poly);
     using namespace VideoVulkan;
+    hw_sync();
 
     if (!ctx.frame_width || !ctx.frame_height)
         return;
@@ -755,6 +856,7 @@ void GPU::hw_print_stats(int frame)
 {
     if (!hw)
         return;
+    hw_sync();
     fprintf(stderr, "[GPUTRACE] frame %d: vulkan sessions %llu draws %llu tex-hashed %llu tex-hash-hits %llu | %s\n",
             frame, (unsigned long long)hw->sessions, (unsigned long long)hw->draws,
             (unsigned long long)hw->tex_hashed, (unsigned long long)hw->tex_hash_hits, hw->vk->stats().c_str());
@@ -762,10 +864,11 @@ void GPU::hw_print_stats(int frame)
     //upload, texture hashing, waiting for the GPU + readback, and the writeback to memory
     HwRenderer& h = *hw;
     fprintf(stderr, "[GPUTRACE] frame %d: vulkan ms/frame poly %.2f (upload %.2f hash %.2f, %.0f KB) "
-            "wait+readback %.2f writeback %.2f | upload px/frame %.0f, sessions kept %llu filled %llu\n", frame,
+            "wait+readback %.2f writeback %.2f (%s, emulation waited %.2f) | upload px/frame %.0f, sessions kept %llu filled %llu\n", frame,
             h.t_poly / 60, h.t_begin / 60, h.t_hash / 60, h.hashed_bytes / 60.0 / 1024.0, h.t_wait / 60,
-            h.t_writeback / 60, h.pixels / 60.0, (unsigned long long)h.reused, (unsigned long long)h.uniform);
-    h.t_poly = h.t_begin = h.t_hash = h.t_wait = h.t_writeback = 0;
+            h.t_writeback / 60, h.async ? "async" : "inline", h.t_sync / 60, h.pixels / 60.0,
+            (unsigned long long)h.reused, (unsigned long long)h.uniform);
+    h.t_poly = h.t_begin = h.t_hash = h.t_wait = h.t_writeback = h.t_sync = 0;
     h.hashed_bytes = h.pixels = 0;
 }
 
@@ -774,6 +877,7 @@ void GPU::hw_print_stats(int frame)
 void GPU::hw_print_stats(int) {}
 
 void GPU::hw_end_session() {}
+void GPU::hw_sync() {}
 void GPU::hw_polygon(std::vector<Vertex>&) {}
 
 #endif

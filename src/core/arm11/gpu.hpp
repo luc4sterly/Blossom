@@ -425,7 +425,9 @@ class GPU
         Vertex vtx_cache[VTX_CACHE_SIZE];
         uint32_t vtx_cache_tag[VTX_CACHE_SIZE];
         void hw_polygon(std::vector<Vertex>& poly);
+        void hw_finish_session(uint8_t* color_mem, uint8_t* depth_mem);
         void hw_end_session();
+        void hw_sync(); //Waits for the last session's writeback (see gpu_hw.cpp)
         void hw_shutdown();
         void hw_print_stats(int frame);
         uint32_t hw_read_fb(uint32_t addr, int size);
@@ -441,7 +443,7 @@ class GPU
         //Test hooks (src/tests/gpu_test.cpp): drive the rasterizer without a command list
         void test_write_reg(int reg, uint32_t value) { write_cmd_register(reg, value, 0xF); }
         void test_triangle(Vertex v0, Vertex v1, Vertex v2) { process_tri(v0, v1, v2); }
-        void test_end_list() { if (hw) hw_end_session(); }
+        void test_end_list() { if (hw) { hw_end_session(); hw_sync(); } }
 
         GPU(Emulator* e, Scheduler* scheduler, MPCore_PMR* pmr);
         ~GPU();

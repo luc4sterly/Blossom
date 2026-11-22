@@ -203,6 +203,19 @@ struct VulkanRasterizer::Impl
     uint8_t* stage(VkDeviceSize size, VkBuffer& buf, VkDeviceSize& offset);
     void begin_recording();
     void submit_and_wait();
+    //submit_and_wait in three steps, so the wait can happen on another thread
+    void submit();
+    void wait_fence();
+    void after_wait();
+    bool in_flight = false;
+    void finish_in_flight()
+    {
+        if (in_flight)
+        {
+            wait_fence();
+            after_wait();
+        }
+    }
     void flush_pending();
     void open_render_pass();
     void internal_flush();
@@ -758,6 +771,13 @@ void VulkanRasterizer::Impl::begin_recording()
 
 void VulkanRasterizer::Impl::submit_and_wait()
 {
+    submit();
+    wait_fence();
+    after_wait();
+}
+
+void VulkanRasterizer::Impl::submit()
+{
     check(vkEndCommandBuffer(upload_cmd), "vkEndCommandBuffer");
     check(vkEndCommandBuffer(draw_cmd), "vkEndCommandBuffer");
     recording = false;
@@ -767,11 +787,20 @@ void VulkanRasterizer::Impl::submit_and_wait()
     si.pCommandBuffers = cmds;
     auto t0 = std::chrono::steady_clock::now();
     check(vkQueueSubmit(queue, 1, &si, fence), "vkQueueSubmit");
-    auto t1 = std::chrono::steady_clock::now();
+    t_submit += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    in_flight = true;
+}
+
+void VulkanRasterizer::Impl::wait_fence()
+{
+    auto t0 = std::chrono::steady_clock::now();
     check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-    auto t2 = std::chrono::steady_clock::now();
-    t_submit += std::chrono::duration<double, std::milli>(t1 - t0).count();
-    t_fence += std::chrono::duration<double, std::milli>(t2 - t1).count();
+    t_fence += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void VulkanRasterizer::Impl::after_wait()
+{
+    in_flight = false;
     vkResetFences(device, 1, &fence);
 
     //Everything recorded is done, so the per-submit allocators start over
@@ -1104,6 +1133,7 @@ bool VulkanRasterizer::begin_cached(uint64_t tag, uint32_t width, uint32_t heigh
     Impl& d = *impl;
     if (d.session)
         end(nullptr, nullptr, nullptr);
+    d.finish_in_flight();
     if (!tag || !d.select_target(width, height, tag))
         return false;
     //The images are where the last end() left them (transfer source); keep their contents
@@ -1130,6 +1160,7 @@ void VulkanRasterizer::begin(uint32_t width, uint32_t height, const uint32_t* co
     Impl& d = *impl;
     if (d.session)
         end(nullptr, nullptr, nullptr);
+    d.finish_in_flight();
     d.select_target(width, height, tag);
     d.target_valid = false;
 
@@ -1294,6 +1325,23 @@ void VulkanRasterizer::draw(const HwPipelineKey& key, const HwDynamicState& dyn,
 
 void VulkanRasterizer::end(uint32_t* color, float* depth, uint8_t* stencil)
 {
+    end_submit();
+    end_wait(color, depth, stencil);
+    end_complete();
+}
+
+void VulkanRasterizer::end_complete()
+{
+    Impl& d = *impl;
+    if (d.in_flight)
+    {
+        d.wait_fence();
+        d.after_wait();
+    }
+}
+
+void VulkanRasterizer::end_submit()
+{
     Impl& d = *impl;
     if (!d.session)
         return;
@@ -1332,10 +1380,19 @@ void VulkanRasterizer::end(uint32_t* color, float* depth, uint8_t* stencil)
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr,
                          0, nullptr);
 
-    d.submit_and_wait();
+    d.submit();
     d.session = false;
     //end() leaves the images in the transfer-source layout begin_cached expects
     d.target_valid = d.target_tag != 0;
+}
+
+void VulkanRasterizer::end_wait(uint32_t* color, float* depth, uint8_t* stencil)
+{
+    Impl& d = *impl;
+    if (!d.in_flight)
+        return;
+    d.wait_fence();
+    size_t n = (size_t)d.width * d.height;
 
     if (!d.readback.coherent)
     {

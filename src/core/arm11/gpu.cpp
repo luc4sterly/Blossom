@@ -209,6 +209,7 @@ void GPU::print_debug_stats(int frame)
 void GPU::render_frame()
 {
     Profiler::Scope prof_scope(Profiler::GPU_DISPLAY);
+    hw_sync();
     const bool force = ignore_screenfill();
     for (int y = 0; y < 400; y++)
     {
@@ -312,6 +313,7 @@ uint32_t GPU::get_swizzled_tile_addr(uint32_t base, uint32_t width, uint32_t x, 
 void GPU::do_transfer_engine_dma(uint64_t param)
 {
     Profiler::Scope prof_scope(Profiler::GPU_TRANSFER);
+    hw_sync();
     //VRAM/FCRAM are plain memory: go through a pointer instead of the ARM11 bus for each pixel
     auto rd = [&](uint32_t addr, int size) -> uint32_t {
         if (uint8_t* p = e->phys_ptr(addr, size))
@@ -626,6 +628,7 @@ void GPU::do_command_engine_dma(uint64_t index)
 void GPU::do_memfill(int index)
 {
     Profiler::Scope prof_scope(Profiler::GPU_MEMFILL);
+    hw_sync();
     //TODO: Is the end region inclusive or exclusive? This code assumes exclusive
     printf("[GPU] Do memfill%d\n", index);
     printf("Start: $%08X End: $%08X Value: $%08X Width: %d\n",
