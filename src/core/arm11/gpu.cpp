@@ -174,6 +174,9 @@ void GPU::print_debug_stats(int frame)
     if (!trace_enabled() || frame % 60)
         return;
     hw_print_stats(frame);
+    fprintf(stderr, "[GPUTRACE] frame %d: vertex shader runs %llu, cache hits %llu, instructions %llu (totals)\n",
+            frame, (unsigned long long)stats.vsh_runs, (unsigned long long)stats.vtx_cache_hits,
+            (unsigned long long)stats.vsh_instrs);
     fprintf(stderr, "[GPUTRACE] frame %d: cmdlists %llu (%llu words, %llu draws, %llu finalize) "
             "ppf %llu memfill %llu/%llu | fb0 sel %llu addr %llu fill %llu (%s $%06X) "
             "fb1 sel %llu addr %llu fill %llu (%s $%06X) lcd_init %d\n", frame,
@@ -1255,6 +1258,7 @@ void GPU::draw_vtx_array(bool is_indexed)
         uint32_t slot = index % VTX_CACHE_SIZE;
         if (use_cache && vtx_cache_tag[slot] == index)
         {
+            stats.vtx_cache_hits++;
             submit_vtx(vtx_cache[slot], false);
             continue;
         }
@@ -3251,10 +3255,13 @@ void GPU::exec_shader(ShaderUnit& sh)
     sh.call_ptr = 0;
     sh.if_ptr = 0;
     sh.pc = sh.entry_point * 4;
+    if (&sh == &ctx.vsh)
+        stats.vsh_runs++;
 
     bool ended = false;
     while (!ended)
     {
+        stats.vsh_instrs++;
         uint32_t instr = *(uint32_t*)&sh.code[sh.pc];
         //printf("[GPU] [$%04X] $%08X\n", sh.pc, instr);
         sh.pc += 4;

@@ -412,6 +412,7 @@ class GPU
         struct DebugStats
         {
             uint64_t cmdlists, cmd_words, draws, finalize, ppf, memfill[2];
+            uint64_t vsh_runs, vtx_cache_hits, vsh_instrs;
             uint64_t fb_select[2], fb_addr[2], fill_writes[2];
         } stats;
         void note_unknown(char kind, uint32_t addr, uint32_t value);
