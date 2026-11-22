@@ -3,6 +3,7 @@
 #include "core/cpu/arm_interpret.hpp"
 #include "core/cpu/arm_disasm.hpp"
 #include "common/common.hpp"
+#include "common/log.hpp"
 
 namespace ARM_Interpreter
 {

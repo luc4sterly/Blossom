@@ -11,13 +11,19 @@ using namespace std;
 int main(int argc, char** argv)
 {
     //The emulator core prints a lot of debug chatter to stdout (GPU command lists, PXI, interrupt
-    //controller...). Line-buffered or console output turns each line into a system call, which
+    //controller...). It is off unless BLOSSOM_LOG=1 (common/log.hpp). When on, line-buffered or console output turns each line into a system call, which
     //cost a big share of every frame on Windows. A large buffer keeps it cheap; BLOSSOM_LOG_FLUSH=1
     //restores line buffering for live logs.
     static char stdout_buffer[1 << 20];
     const char* flush_env = getenv("BLOSSOM_LOG_FLUSH");
     if (!(flush_env && flush_env[0] == '1'))
         setvbuf(stdout, stdout_buffer, _IOFBF, sizeof(stdout_buffer));
+    //stderr too: the profiler and traces write ~30 pieces a frame, and unbuffered writes to a file
+    //redirected by the launcher (Start-Process on Windows) cost ~200 ms a frame. Emulator::run
+    //flushes once per frame and the watchdog flushes its own reports.
+    static char stderr_buffer[1 << 18];
+    if (!(flush_env && flush_env[0] == '1'))
+        setvbuf(stderr, stderr_buffer, _IOFBF, sizeof(stderr_buffer));
 
     QApplication a(argc, argv);
     QApplication::setApplicationName("Blossom");
@@ -35,6 +41,8 @@ int main(int argc, char** argv)
         {"autoload-nocart", "Starts emulation immediately without a cartridge."},
         {"cpu", "CPU backend for this run: jit (default), jit11 (JIT on ARM11 only) or interp "
                 "(interpreter, for debugging and comparing).", "backend"},
+        {"gpu", "GPU renderer for this run: vulkan (default) or software (Corgi's rasterizer, "
+                "for comparing).", "renderer"},
         {"dev-unsigned", "Development: accept the self-signed NCSD header of a synthetic NAND "
                          "built with tools/mknand. Real signatures are still checked."}
     });
@@ -62,6 +70,7 @@ int main(int argc, char** argv)
 
     Settings::dev_unsigned = parser.isSet("dev-unsigned");
     Settings::cpu_backend_override = parser.value("cpu");
+    Settings::gpu_renderer_override = parser.value("gpu");
 
     //The order of this is important - we need to save settings before EmuWindow is constructed.
     //Otherwise, the settings window will have the old settings in the UI.

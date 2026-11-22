@@ -4,6 +4,7 @@
 #include "core/arm9/dma9.hpp"
 #include "core/arm9/emmc.hpp"
 #include "core/arm9/interrupt9.hpp"
+#include "common/log.hpp"
 
 #define ISTAT_CMDEND 0x1
 #define ISTAT_DATAEND 0x4
@@ -112,9 +113,16 @@ bool EMMC::parse_essentials(uint8_t *otp)
 bool EMMC::is_n3ds()
 {
     //Read the partition crypt types at 0x118-0x120. If one of them is 0x3, this is a New3DS NAND.
-    char sector[0x200];
+    //Without a NAND (the CPU tests) the read fails; an uninitialized buffer made the model random
+    char sector[0x200] = {};
+    nand.clear();
     nand.seekg(0);
     nand.read((char*)sector, 0x200);
+    if (nand.gcount() != 0x200)
+    {
+        nand.clear();
+        return false;
+    }
 
     for (int i = 0x118; i < 0x120; i++)
     {

@@ -14,6 +14,7 @@ class SettingsWindow : public QWidget
         QLabel* nand_info;
         QLabel* sd_info;
         QComboBox* cpu_box;
+        QComboBox* gpu_box;
 
         void settings_update();
     public:

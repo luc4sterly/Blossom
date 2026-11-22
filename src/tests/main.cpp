@@ -4,6 +4,7 @@
 #include <string>
 #include "core/emulator.hpp"
 #include "common/exceptions.hpp"
+#include "common/log.hpp"
 
 using namespace std;
 
@@ -21,6 +22,8 @@ static int usage()
 
 int main(int argc, char** argv)
 {
+    //The test ELFs print their results through SWI $FF, which goes to stdout
+    Log::stdout_enabled = true;
     bool jit = false;
     int core = 9;
     bool thumb = false;

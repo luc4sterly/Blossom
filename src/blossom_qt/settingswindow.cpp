@@ -93,9 +93,29 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QWidget(parent)
     QGroupBox* cpu_settings_box = new QGroupBox(tr("CPU"));
     cpu_settings_box->setLayout(cpu_grid);
 
+    gpu_box = new QComboBox;
+    gpu_box->addItem(tr("Vulkan - hardware, fast"), "vulkan");
+    gpu_box->addItem(tr("Software - slow, for comparing"), "software");
+    int gpu_index = gpu_box->findData(Settings::gpu_renderer);
+    gpu_box->setCurrentIndex(gpu_index >= 0 ? gpu_index : 0);
+    connect(gpu_box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+    {
+        Settings::gpu_renderer = gpu_box->currentData().toString();
+        Settings::save();
+    });
+
+    QGridLayout* gpu_grid = new QGridLayout;
+    gpu_grid->addWidget(new QLabel(tr("Renderer")), 0, 0);
+    gpu_grid->addWidget(gpu_box, 0, 1);
+    gpu_grid->addWidget(new QLabel(tr("Takes effect the next time the emulator boots.")), 1, 0, 1, 2);
+
+    QGroupBox* gpu_settings_box = new QGroupBox(tr("GPU"));
+    gpu_settings_box->setLayout(gpu_grid);
+
     QVBoxLayout* layout = new QVBoxLayout;
     layout->addWidget(system_files_box);
     layout->addWidget(cpu_settings_box);
+    layout->addWidget(gpu_settings_box);
 
     setLayout(layout);
 

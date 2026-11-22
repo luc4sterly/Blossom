@@ -1,6 +1,7 @@
 #include <cstring>
 #include <cstdio>
 #include "core/cpu/mmu.hpp"
+#include "common/log.hpp"
 
 MMU::MMU()
 {

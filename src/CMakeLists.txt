@@ -13,6 +13,9 @@ else()
 endif()
 
 add_subdirectory(common)
+if (ENABLE_VULKAN)
+    add_subdirectory(video_core)
+endif()
 add_subdirectory(core)
 
 if (ENABLE_QT)

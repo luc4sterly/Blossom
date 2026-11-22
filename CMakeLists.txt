@@ -19,6 +19,7 @@ else()
     set(BLOSSOM_JIT_DEFAULT OFF)
 endif()
 option(ENABLE_JIT "Build the dynarmic JIT CPU backend (x86-64)" ${BLOSSOM_JIT_DEFAULT})
+option(ENABLE_VULKAN "Build the Vulkan hardware renderer (needs the Vulkan headers and loader)" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +42,16 @@ if (ENABLE_JIT)
     set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
     find_package(Boost 1.57 REQUIRED)
     add_subdirectory(externals/dynarmic EXCLUDE_FROM_ALL)
+endif()
+
+if (ENABLE_VULKAN)
+    find_package(Vulkan)
+    if (NOT Vulkan_FOUND)
+        message(WARNING "Vulkan not found: building without the Vulkan renderer. "
+                        "Install the Vulkan headers and loader (MSYS2: mingw-w64-ucrt-x86_64-vulkan-devel, "
+                        "Ubuntu: libvulkan-dev) or pass -DENABLE_VULKAN=OFF.")
+        set(ENABLE_VULKAN OFF)
+    endif()
 endif()
 
 if (ENABLE_TESTS)

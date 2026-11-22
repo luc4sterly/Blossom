@@ -10,6 +10,7 @@
 #include <chrono>
 #include "common/common.hpp"
 #include "core/emulator.hpp"
+#include "common/log.hpp"
 
 Emulator::Emulator() :
     arm9(this, 9, &arm9_cp15, nullptr),
@@ -214,6 +215,30 @@ void Emulator::reset(bool cold_boot)
     scheduler.set_clockrate_xtensa(XTENSA_CLOCKRATE);
 }
 
+uint8_t* Emulator::phys_ptr(uint32_t addr, uint32_t len)
+{
+    uint64_t end = (uint64_t)addr + len;
+    if (addr >= 0x18000000 && end <= 0x18600000)
+        return vram + (addr - 0x18000000);
+    if (addr >= 0x20000000 && end <= 0x20000000ULL + fcram_size)
+        return fcram + (addr - 0x20000000);
+    if (addr >= 0x1FF80000 && end <= 0x20000000)
+        return axi_RAM + (addr - 0x1FF80000);
+    return nullptr;
+}
+
+bool Emulator::set_gpu_renderer(const char* name)
+{
+    return gpu.set_renderer(name);
+}
+
+void Emulator::apply_gpu_renderer_env()
+{
+    const char* env = GPU::renderer_env();
+    if (env)
+        gpu.set_renderer(env);
+}
+
 bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
 {
     if ((arm11_jit || arm9_jit) && !ARM_CPU::jit_available())
@@ -236,6 +261,7 @@ bool Emulator::set_cpu_backend(bool arm11_jit, bool arm9_jit)
     int slice = 256;
     if (const char* env = std::getenv("BLOSSOM_SLICE"))
         slice = atoi(env) > 0 ? atoi(env) : slice;
+    slice_cycles = slice;
     scheduler.set_max_cycles(slice);
     printf("[Emulator] CPU backend: ARM11 %s, ARM9 %s, slice %d\n", arm11_jit ? "JIT" : "interpreter",
            arm9_jit ? "JIT" : "interpreter", slice);
@@ -361,6 +387,7 @@ void Emulator::watchdog_loop()
 
 void Emulator::run()
 {
+    Profiler::claim_thread();
     start_watchdog();
     NativeStack::set_target_thread();
     i2c.update_time();
@@ -376,7 +403,27 @@ void Emulator::run()
     cartridge.save_check();
     while (!frame_ended)
     {
+        const bool prof_loop = Profiler::enabled;
+        if (prof_loop)
+            Profiler::enter(Profiler::LOOP);
+        //Every core waiting for an interrupt: nothing can race, so with BLOSSOM_IDLE_SLICE=<cycles>
+        //the slice may run longer (still up to the next event). Interrupts raised by the timers or
+        //the DSP during it wake the cores at most that many cycles late.
+        static const int idle_slice = [] {
+            const char* env = getenv("BLOSSOM_IDLE_SLICE");
+            return env ? atoi(env) : 0;
+        }();
+        const bool idle = arm11[0].is_halted() && arm11[1].is_halted() &&
+                          (!is_n3ds || (arm11[2].is_halted() && arm11[3].is_halted())) && arm9.is_halted();
+        if (idle)
+        {
+            Profiler::counters[Profiler::IDLE_SLICES]++;
+            if (idle_slice > 0)
+                scheduler.set_max_cycles(idle_slice);
+        }
         scheduler.calculate_cycles_to_run();
+        if (idle && idle_slice > 0)
+            scheduler.set_max_cycles(slice_cycles);
         int cycles11 = scheduler.get_cycles11_to_run();
         int cycles9 = scheduler.get_cycles9_to_run();
         Profiler::counters[Profiler::SLICES]++;
@@ -388,13 +435,15 @@ void Emulator::run()
                 const char* env = getenv("BLOSSOM_MAX_RAM_MB");
                 return env ? atol(env) : 4096L;
             }();
-            long mb = Profiler::resident_mb();
+            long mb = std::max(Profiler::resident_mb(), Profiler::private_mb());
             if (max_mb > 0 && mb > max_mb)
                 EmuException::die("[Emulator] Using %ld MB of memory (limit %ld MB) in frame %d, stopping",
                                   mb, max_mb, frames);
         }
         if (cycles11 < 64)
             Profiler::counters[Profiler::SHORT_SLICES]++;
+        if (prof_loop)
+            Profiler::leave();
 
         {
             Profiler::Scope prof_scope(Profiler::ARM11);
@@ -439,6 +488,9 @@ void Emulator::run()
             scheduler.process_events();
         }
     }
+    const bool prof_report = Profiler::enabled;
+    if (prof_report)
+        Profiler::enter(Profiler::REPORT);
     gpu.print_debug_stats(frames);
     ARM_CPU::print_svc_stats(frames);
     Profiler::end_frame(frames);
@@ -477,6 +529,9 @@ void Emulator::run()
             arm11[i].print_jit_stats();
         arm9.print_jit_stats();
     }
+    fflush(stderr);
+    if (prof_report)
+        Profiler::leave();
     frames++;
 }
 

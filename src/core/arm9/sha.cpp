@@ -3,6 +3,7 @@
 #include "common/common.hpp"
 #include "core/arm9/dma9.hpp"
 #include "core/arm9/sha.hpp"
+#include "common/log.hpp"
 
 SHA::SHA(DMA9* dma9) : dma9(dma9)
 {

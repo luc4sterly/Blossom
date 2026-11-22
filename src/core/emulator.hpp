@@ -112,6 +112,7 @@ class Emulator
         bool set_cpu_backend(bool arm11_jit, bool arm9_jit);
         void pxi_sync_point(bool from_arm9);
         uint64_t memory_check_counter = 0;
+        int slice_cycles = 256; //normal scheduler slice (BLOSSOM_SLICE)
 
         //Watchdog thread: reports where the emulator is when a frame takes too long or memory
         //grows past BLOSSOM_MAX_RAM_MB, and stops the process in the second case
@@ -156,6 +157,16 @@ class Emulator
         void arm11_write32(int core, uint32_t addr, uint32_t value);
 
         void arm11_send_events(int id);
+
+        //Host pointer for len bytes of physical memory at addr (VRAM, FCRAM or AXI WRAM), or
+        //nullptr if the range is not all in one of them. Used by the hardware renderer.
+        uint8_t* phys_ptr(uint32_t addr, uint32_t len);
+        //GPU renderer: "software" or "vulkan". Returns false if Vulkan could not start.
+        bool set_gpu_renderer(const char* name);
+        //Reads BLOSSOM_GPU and applies it if set.
+        void apply_gpu_renderer_env();
+
+        GPU& gpu_for_tests() { return gpu; }
 
         uint8_t* get_top_buffer();
         uint8_t* get_bottom_buffer();

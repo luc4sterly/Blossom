@@ -36,6 +36,12 @@ enum Bucket
     //Inside gpu-cmd: vertex attribute fetch, and primitive assembly/clipping/setup (raster excluded)
     GPU_VTX_FETCH,
     GPU_PRIM,
+    //Inside "other": the emulator loop picking the next slice, and the emulation thread waiting
+    //for the UI between frames (and handing it the frame)
+    LOOP,
+    FRONTEND,
+    //End of frame bookkeeping in Emulator::run: trace and profile output
+    REPORT,
     BUCKET_COUNT
 };
 
@@ -52,6 +58,7 @@ enum Counter
     SLICES,
     JIT_COMPILES,
     SHORT_SLICES,
+    IDLE_SLICES,
     COUNTER_COUNT
 };
 
@@ -63,8 +70,13 @@ void init();
 void enter(Bucket b);
 void leave();
 void end_frame(int frame);
+//Makes the calling thread the one being profiled (Emulator::run calls it every frame)
+void claim_thread();
 //Resident memory of the process in MB, or -1 if unknown
 long resident_mb();
+//Committed private memory in MB on Windows (what Task Manager calls "commit"), -1 elsewhere.
+//A leak can grow it while the working set stays small.
+long private_mb();
 //Name of a bucket, and a racy snapshot of the bucket stack (innermost last) for the watchdog thread
 const char* bucket_name(int bucket);
 int stack_snapshot(int* out, int max);

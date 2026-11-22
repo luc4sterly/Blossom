@@ -8,6 +8,8 @@ QString Settings::sd_path;
 bool Settings::dev_unsigned = false;
 QString Settings::cpu_backend = "jit";
 QString Settings::cpu_backend_override;
+QString Settings::gpu_renderer = "vulkan";
+QString Settings::gpu_renderer_override;
 
 namespace Settings
 {
@@ -21,6 +23,7 @@ void load()
     nand_path = qset.value("system/nand", "").toString();
     sd_path = qset.value("system/sd", "").toString();
     cpu_backend = qset.value("cpu/backend", "jit").toString();
+    gpu_renderer = qset.value("gpu/renderer", "vulkan").toString();
 }
 
 void save()
@@ -32,6 +35,7 @@ void save()
     qset.setValue("system/nand", nand_path);
     qset.setValue("system/sd", sd_path);
     qset.setValue("cpu/backend", cpu_backend);
+    qset.setValue("gpu/renderer", gpu_renderer);
 }
 
 }

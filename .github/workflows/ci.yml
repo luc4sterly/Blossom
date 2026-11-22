@@ -14,7 +14,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev libboost-dev
+            cmake ninja-build g++ qt6-base-dev libgl-dev libgmp-dev libboost-dev \
+            libvulkan-dev mesa-vulkan-drivers
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
