@@ -419,6 +419,7 @@ class GPU
         //Hardware (Vulkan) renderer, see gpu_hw.cpp. nullptr = software rasterizer.
         struct HwRenderer;
         HwRenderer* hw = nullptr;
+        std::vector<Vertex> clip_input, clip_output; //process_tri's scratch lists
         void hw_polygon(std::vector<Vertex>& poly);
         void hw_end_session();
         void hw_shutdown();

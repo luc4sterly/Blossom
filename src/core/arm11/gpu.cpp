@@ -1441,18 +1441,20 @@ void GPU::process_tri(Vertex &v0, Vertex &v1, Vertex &v2)
 {
     //There are 6 clipping planes. As a clipping operation can result in an extra vertex being produced,
     //the maximum amount of vertices a primitive can have is 9.
-    std::vector<Vertex> output_list;
-    std::vector<Vertex> input_list;
+    //The lists are members so a triangle doesn't allocate (this runs thousands of times a frame)
+    std::vector<Vertex>& output_list = clip_output;
+    std::vector<Vertex>& input_list = clip_input;
+    output_list.clear();
 
     output_list.push_back(v0);
     output_list.push_back(v1);
     output_list.push_back(v2);
 
-    float24 one = float24::FromFloat32(1.0f);
-    float24 zero = float24::FromFloat32(0.0f);
-    float24 epsilon = float24::FromFloat32(0.000001f);
+    static const float24 one = float24::FromFloat32(1.0f);
+    static const float24 zero = float24::FromFloat32(0.0f);
+    static const float24 epsilon = float24::FromFloat32(0.000001f);
 
-    Vec4<float24> clipping_planes[7] =
+    static const Vec4<float24> clipping_planes[7] =
     {
         {-one, zero, zero, one},
         {one, zero, zero, one},
@@ -1463,7 +1465,7 @@ void GPU::process_tri(Vertex &v0, Vertex &v1, Vertex &v2)
         {zero, zero, zero, one} //epsilon is applied here
     };
 
-    Vec4<float24> bias[7] =
+    static const Vec4<float24> bias[7] =
     {
         {zero, zero, zero, zero},
         {zero, zero, zero, zero},
@@ -1474,7 +1476,22 @@ void GPU::process_tri(Vertex &v0, Vertex &v1, Vertex &v2)
         {zero, zero, zero, epsilon}
     };
 
-    for (int plane = 0; plane < 7; plane++)
+    //Most triangles are inside every plane, and then clipping leaves the list as it is: skip it.
+    //The inside test is the same expression the clipper uses, so the result is identical.
+    bool all_inside = true;
+    for (int plane = 0; plane < 7 && all_inside; plane++)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            if (!(dp4(output_list[i].pos + bias[plane], clipping_planes[plane]) >= zero))
+            {
+                all_inside = false;
+                break;
+            }
+        }
+    }
+
+    for (int plane = 0; plane < 7 && !all_inside; plane++)
     {
         std::swap(input_list, output_list);
         output_list.clear();
@@ -1490,18 +1507,21 @@ void GPU::process_tri(Vertex &v0, Vertex &v1, Vertex &v2)
             bool vtx_inside = vtx_dp >= zero;
             bool ref_inside = ref_dp >= zero;
 
-            float24 lerp_factor = ref_dp / (ref_dp - vtx_dp);
-            Vertex intersection = vtx * lerp_factor + ref * (one - lerp_factor);
+            //Only computed when it is used
+            auto intersection = [&]() {
+                float24 lerp_factor = ref_dp / (ref_dp - vtx_dp);
+                return vtx * lerp_factor + ref * (one - lerp_factor);
+            };
 
             if (vtx_inside)
             {
                 if (!ref_inside)
-                    output_list.push_back(intersection);
+                    output_list.push_back(intersection());
 
                 output_list.push_back(vtx);
             }
             else if (ref_inside)
-                output_list.push_back(intersection);
+                output_list.push_back(intersection());
 
             ref = vtx;
         }
