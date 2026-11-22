@@ -78,13 +78,21 @@ class VulkanRasterizer
 
         const std::string& device_name() const;
         bool in_session() const;
+        // The depth image is D32F (no D24S8 on this device): it keeps more precision than memory
+        bool depth_is_float() const;
         //Cache sizes, for BLOSSOM_TRACE_GPU
         std::string stats() const;
 
         // Starts a session on a width x height target. color: RGBA8 (R in the low byte),
         // depth: 0..1, stencil: 8 bits; all row-major, top row first.
+        // tag (optional) names the memory the target mirrors, for begin_cached.
         void begin(uint32_t width, uint32_t height, const uint32_t* color, const float* depth,
-                   const uint8_t* stencil);
+                   const uint8_t* stencil, uint64_t tag = 0);
+
+        // Starts a session on the target a previous session with the same tag ended on, keeping
+        // its contents (the caller checked that memory still holds what that session wrote back).
+        // Returns false, starting nothing, when that target is gone; call begin() then.
+        bool begin_cached(uint64_t tag, uint32_t width, uint32_t height);
 
         // Returns a texture id for this session. fill is only called on a cache miss and must
         // write width * height RGBA8 texels, row-major.

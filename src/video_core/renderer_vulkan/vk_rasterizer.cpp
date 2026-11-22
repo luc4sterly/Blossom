@@ -63,6 +63,19 @@ struct Image
     VkImageView view = VK_NULL_HANDLE;
 };
 
+//A render target kept between sessions: the top and bottom screens (and render-to-texture
+//targets) alternate, and recreating the images on every size change cost milliseconds each
+struct Target
+{
+    uint32_t width = 0, height = 0;
+    Image color, depth;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    Buffer readback;
+    uint64_t tag = 0;     //Caller's id of the memory this target mirrors
+    bool valid = false;   //The images hold what the last session with this tag left
+    uint64_t last_used = 0;
+};
+
 struct Texture
 {
     Image image;
@@ -134,6 +147,10 @@ struct VulkanRasterizer::Impl
     VkImageView depth_only_view = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     Buffer readback;
+    uint64_t target_tag = 0;
+    bool target_valid = false;
+    std::vector<Target> parked;
+    uint64_t target_creates = 0, target_reuses = 0;
 
     Buffer vertex_ring, uniform_ring;
     std::vector<Buffer> staging;
@@ -175,6 +192,10 @@ struct VulkanRasterizer::Impl
     void free_image(Image& i);
     void make_target(uint32_t w, uint32_t h);
     void free_target();
+    //Makes a w x h target current, preferring the parked one with this tag. Returns whether
+    //it still holds that tag's content.
+    bool select_target(uint32_t w, uint32_t h, uint64_t tag);
+    void swap_target(Target& t);
     VkPipeline get_pipeline(const HwPipelineKey& key);
     uint8_t* stage(VkDeviceSize size, VkBuffer& buf, VkDeviceSize& offset);
     void begin_recording();
@@ -197,6 +218,11 @@ VulkanRasterizer::Impl::~Impl()
             free_image(t.second.image);
         free_image(dummy_tex);
         free_target();
+        for (Target& t : parked)
+        {
+            swap_target(t);
+            free_target();
+        }
         free_buffer(vertex_ring);
         free_buffer(uniform_ring);
         for (auto& b : staging)
@@ -611,6 +637,75 @@ void VulkanRasterizer::Impl::make_target(uint32_t w, uint32_t h)
     readback = make_buffer((VkDeviceSize)w * h * 9 + 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
+void VulkanRasterizer::Impl::swap_target(Target& t)
+{
+    std::swap(width, t.width);
+    std::swap(height, t.height);
+    std::swap(color, t.color);
+    std::swap(depth, t.depth);
+    std::swap(framebuffer, t.framebuffer);
+    std::swap(readback, t.readback);
+    std::swap(target_tag, t.tag);
+    std::swap(target_valid, t.valid);
+}
+
+bool VulkanRasterizer::Impl::select_target(uint32_t w, uint32_t h, uint64_t tag)
+{
+    if (width == w && height == h && (!tag || target_tag == tag))
+        return tag && target_valid;
+    //Park the current one and look for a better match
+    if (width)
+    {
+        Target t;
+        swap_target(t);
+        t.last_used = serial;
+        parked.push_back(t);
+    }
+    int best = -1;
+    for (size_t i = 0; i < parked.size(); i++)
+    {
+        if (parked[i].width != w || parked[i].height != h)
+            continue;
+        if (tag && parked[i].tag == tag)
+        {
+            best = (int)i;
+            break;
+        }
+        if (best < 0)
+            best = (int)i;
+    }
+    if (best >= 0)
+    {
+        swap_target(parked[best]);
+        parked.erase(parked.begin() + best);
+        target_reuses++;
+    }
+    else
+    {
+        make_target(w, h);
+        target_creates++;
+    }
+    if (target_tag != tag)
+    {
+        target_tag = tag;
+        target_valid = false;
+    }
+    //Keep a few; free the least recently used
+    while (parked.size() > 6)
+    {
+        size_t oldest = 0;
+        for (size_t i = 1; i < parked.size(); i++)
+            if (parked[i].last_used < parked[oldest].last_used)
+                oldest = i;
+        Target t = parked[oldest];
+        parked.erase(parked.begin() + oldest);
+        swap_target(t);
+        free_target();
+        swap_target(t);
+    }
+    return tag && target_valid;
+}
+
 void VulkanRasterizer::Impl::free_target()
 {
     if (framebuffer)
@@ -969,16 +1064,22 @@ const std::string& VulkanRasterizer::device_name() const
     return impl->name;
 }
 
+bool VulkanRasterizer::depth_is_float() const
+{
+    return impl->depth_is_float;
+}
+
 std::string VulkanRasterizer::stats() const
 {
     VkDeviceSize staging_total = 0;
     for (auto& b : impl->staging)
         staging_total += b.size;
     char buf[200];
-    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu readback %s",
+    snprintf(buf, sizeof(buf), "textures %zu (%llu MB) staging %llu MB pipelines %zu submits %llu readback %s targets %zu new %llu",
              impl->textures.size(), (unsigned long long)(impl->texture_bytes >> 20),
              (unsigned long long)(staging_total >> 20), impl->pipelines.size(),
-             (unsigned long long)impl->serial, impl->readback.cached ? "cached" : "uncached");
+             (unsigned long long)impl->serial, impl->readback.cached ? "cached" : "uncached",
+             impl->parked.size() + 1, (unsigned long long)impl->target_creates);
     return buf;
 }
 
@@ -987,14 +1088,39 @@ bool VulkanRasterizer::in_session() const
     return impl->session;
 }
 
-void VulkanRasterizer::begin(uint32_t width, uint32_t height, const uint32_t* color, const float* depth,
-                             const uint8_t* stencil)
+bool VulkanRasterizer::begin_cached(uint64_t tag, uint32_t width, uint32_t height)
 {
     Impl& d = *impl;
     if (d.session)
         end(nullptr, nullptr, nullptr);
-    if (width != d.width || height != d.height)
-        d.make_target(width, height);
+    if (!tag || !d.select_target(width, height, tag))
+        return false;
+    //The images are where the last end() left them (transfer source); keep their contents
+    d.begin_recording();
+    d.session = true;
+    d.target_valid = false;
+    VkCommandBuffer cmd = d.upload_cmd;
+    d.barrier(cmd, d.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+              VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    d.barrier(cmd, d.depth.img, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+              VK_ACCESS_TRANSFER_READ_BIT,
+              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+              VK_PIPELINE_STAGE_TRANSFER_BIT,
+              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+    return true;
+}
+
+void VulkanRasterizer::begin(uint32_t width, uint32_t height, const uint32_t* color, const float* depth,
+                             const uint8_t* stencil, uint64_t tag)
+{
+    Impl& d = *impl;
+    if (d.session)
+        end(nullptr, nullptr, nullptr);
+    d.select_target(width, height, tag);
+    d.target_valid = false;
 
     d.begin_recording();
     d.session = true;
@@ -1197,6 +1323,8 @@ void VulkanRasterizer::end(uint32_t* color, float* depth, uint8_t* stencil)
 
     d.submit_and_wait();
     d.session = false;
+    //end() leaves the images in the transfer-source layout begin_cached expects
+    d.target_valid = d.target_tag != 0;
 
     if (!d.readback.coherent)
     {

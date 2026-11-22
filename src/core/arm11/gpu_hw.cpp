@@ -126,6 +126,18 @@ struct GPU::HwRenderer
         uint64_t hash;
     };
     std::vector<TexHash> tex_hashes;
+    //What the color and depth buffers held when a session on them ended. When memory still
+    //matches at the next session on the same buffers, the Vulkan target still holds the same
+    //image and nothing is uploaded.
+    struct Shadow
+    {
+        uint64_t tag = 0;
+        std::vector<uint8_t> color, depth;
+        uint64_t last_used = 0;
+    };
+    std::vector<Shadow> shadows;
+    uint64_t tag = 0; //Of the current session; 0 when its target can't be kept
+    uint64_t reused = 0, uniform = 0;
     uint64_t tex_hashed = 0, tex_hash_hits = 0;
     //With BLOSSOM_TRACE_GPU: where gpu-raster goes, in ms since the last report
     bool timing = false;
@@ -166,6 +178,12 @@ uint32_t unorm(float d, uint32_t max)
 {
     double v = std::clamp((double)d, 0.0, 1.0) * max + 0.5;
     return (uint32_t)v;
+}
+
+//Every pixel of a buffer the same (a memory fill), checked as "the buffer equals itself shifted by one pixel"
+bool uniform_buffer(const uint8_t* p, uint32_t len, int bpp)
+{
+    return len > (uint32_t)bpp && !memcmp(p, p + bpp, len - bpp);
 }
 
 uint32_t load_le(const uint8_t* p, int size)
@@ -360,6 +378,30 @@ void GPU::hw_end_session()
             }
         }
     }
+
+    //Remember what memory holds now, for the next session on these buffers
+    if (h.tag && color_mem && depth_mem)
+    {
+        HwRenderer::Shadow* sh = nullptr;
+        for (auto& x : h.shadows)
+            if (x.tag == h.tag)
+                sh = &x;
+        if (!sh)
+        {
+            if (h.shadows.size() >= 8)
+            {
+                auto oldest = std::min_element(h.shadows.begin(), h.shadows.end(),
+                    [](const HwRenderer::Shadow& a, const HwRenderer::Shadow& b) { return a.last_used < b.last_used; });
+                h.shadows.erase(oldest);
+            }
+            h.shadows.emplace_back();
+            sh = &h.shadows.back();
+            sh->tag = h.tag;
+        }
+        sh->color.assign(color_mem, color_mem + h.color_len);
+        sh->depth.assign(depth_mem, depth_mem + h.depth_len);
+        sh->last_used = h.sessions;
+    }
 }
 
 void GPU::hw_polygon(std::vector<Vertex>& poly)
@@ -419,56 +461,104 @@ void GPU::hw_polygon(std::vector<Vertex>& poly)
         auto read_fb = [&](uint8_t* mem, uint32_t base, uint32_t addr, int size) {
             return mem ? load_le(mem + (addr - base), size) : hw_read_fb(addr, size);
         };
-        h.pixels += n;
-        for (uint32_t y = 0; y < h.height; y++)
-        {
-            for (uint32_t x = 0; x < h.width; x++)
+        auto decode_color = [&](uint32_t v) {
+            uint32_t r, g, b, a;
+            switch (h.color_fmt)
             {
-                size_t i = y * h.width + x;
-                uint32_t v = read_fb(color_mem, h.color_addr, tile_addr(h.color_addr, fw, x, y, cbpp), cbpp);
-                uint32_t r, g, b, a;
-                switch (h.color_fmt)
-                {
-                    case 0:
-                        r = v >> 24; g = (v >> 16) & 0xFF; b = (v >> 8) & 0xFF; a = v & 0xFF;
-                        break;
-                    case 1:
-                        r = (v >> 16) & 0xFF; g = (v >> 8) & 0xFF; b = v & 0xFF; a = 0xFF;
-                        break;
-                    case 2:
-                        r = Convert5To8(v >> 11); g = Convert5To8((v >> 6) & 0x1F);
-                        b = Convert5To8((v >> 1) & 0x1F); a = Convert1To8(v & 1);
-                        break;
-                    case 3:
-                        r = Convert5To8(v >> 11); g = Convert6To8((v >> 5) & 0x3F); b = Convert5To8(v & 0x1F);
-                        a = 0xFF;
-                        break;
-                    default:
-                        r = Convert4To8(v >> 12); g = Convert4To8((v >> 8) & 0xF);
-                        b = Convert4To8((v >> 4) & 0xF); a = Convert4To8(v & 0xF);
-                        break;
-                }
-                h.color[i] = r | (g << 8) | (b << 16) | (a << 24);
+                case 0:
+                    r = v >> 24; g = (v >> 16) & 0xFF; b = (v >> 8) & 0xFF; a = v & 0xFF;
+                    break;
+                case 1:
+                    r = (v >> 16) & 0xFF; g = (v >> 8) & 0xFF; b = v & 0xFF; a = 0xFF;
+                    break;
+                case 2:
+                    r = Convert5To8(v >> 11); g = Convert5To8((v >> 6) & 0x1F);
+                    b = Convert5To8((v >> 1) & 0x1F); a = Convert1To8(v & 1);
+                    break;
+                case 3:
+                    r = Convert5To8(v >> 11); g = Convert6To8((v >> 5) & 0x3F); b = Convert5To8(v & 0x1F);
+                    a = 0xFF;
+                    break;
+                default:
+                    r = Convert4To8(v >> 12); g = Convert4To8((v >> 8) & 0xF);
+                    b = Convert4To8((v >> 4) & 0xF); a = Convert4To8(v & 0xF);
+                    break;
+            }
+            return r | (g << 8) | (b << 16) | (a << 24);
+        };
+        auto decode_depth = [&](uint32_t d, float& depth, uint8_t& stencil) {
+            switch (h.depth_fmt)
+            {
+                case 2:
+                    depth = d / 16777215.0f;
+                    stencil = 0;
+                    break;
+                case 3:
+                    depth = (d & 0xFFFFFF) / 16777215.0f;
+                    stencil = d >> 24;
+                    break;
+                default:
+                    depth = d / 65535.0f;
+                    stencil = 0;
+                    break;
+            }
+        };
 
-                uint32_t d = read_fb(depth_mem, h.depth_addr, tile_addr(h.depth_addr, fw, x, y, dbpp), dbpp);
-                switch (h.depth_fmt)
+        //The target can be kept between sessions only when it holds exactly what memory does:
+        //RGBA8 color and 24-bit integer depth
+        h.tag = 0;
+        if (color_mem && depth_mem && h.color_fmt == 0 && (h.depth_fmt == 2 || h.depth_fmt == 3) &&
+            !h.vk->depth_is_float())
+        {
+            h.tag = ((uint64_t)h.color_addr << 32 ^ h.depth_addr ^ ((uint64_t)fw << 20) ^ ((uint64_t)fh << 8) ^
+                     ((uint64_t)h.depth_fmt << 4)) | 1;
+        }
+        bool cached = false;
+        if (h.tag)
+        {
+            for (auto& sh : h.shadows)
+            {
+                if (sh.tag == h.tag && sh.color.size() == h.color_len && sh.depth.size() == h.depth_len &&
+                    !memcmp(sh.color.data(), color_mem, h.color_len) && !memcmp(sh.depth.data(), depth_mem, h.depth_len))
                 {
-                    case 2:
-                        h.depth[i] = d / 16777215.0f;
-                        h.stencil[i] = 0;
-                        break;
-                    case 3:
-                        h.depth[i] = (d & 0xFFFFFF) / 16777215.0f;
-                        h.stencil[i] = d >> 24;
-                        break;
-                    default:
-                        h.depth[i] = d / 65535.0f;
-                        h.stencil[i] = 0;
-                        break;
+                    cached = h.vk->begin_cached(h.tag, h.width, h.height);
+                    break;
                 }
             }
         }
-        h.vk->begin(h.width, h.height, h.color.data(), h.depth.data(), h.stencil.data());
+        if (cached)
+            h.reused++;
+        else
+        {
+            h.pixels += n;
+            bool color_fill = color_mem && uniform_buffer(color_mem, h.color_len, cbpp);
+            bool depth_fill = depth_mem && uniform_buffer(depth_mem, h.depth_len, dbpp);
+            if (color_fill)
+                std::fill(h.color.begin(), h.color.end(), decode_color(load_le(color_mem, cbpp)));
+            if (depth_fill)
+            {
+                float d;
+                uint8_t st;
+                decode_depth(load_le(depth_mem, dbpp), d, st);
+                std::fill(h.depth.begin(), h.depth.end(), d);
+                std::fill(h.stencil.begin(), h.stencil.end(), st);
+            }
+            if (color_fill && depth_fill)
+                h.uniform++;
+            for (uint32_t y = 0; y < h.height && !(color_fill && depth_fill); y++)
+            {
+                for (uint32_t x = 0; x < h.width; x++)
+                {
+                    size_t i = y * h.width + x;
+                    if (!color_fill)
+                        h.color[i] = decode_color(read_fb(color_mem, h.color_addr, tile_addr(h.color_addr, fw, x, y, cbpp), cbpp));
+                    if (!depth_fill)
+                        decode_depth(read_fb(depth_mem, h.depth_addr, tile_addr(h.depth_addr, fw, x, y, dbpp), dbpp),
+                                     h.depth[i], h.stencil[i]);
+                }
+            }
+            h.vk->begin(h.width, h.height, h.color.data(), h.depth.data(), h.stencil.data(), h.tag);
+        }
         h.session = true;
         h.sessions++;
     }
@@ -672,8 +762,9 @@ void GPU::hw_print_stats(int frame)
     //upload, texture hashing, waiting for the GPU + readback, and the writeback to memory
     HwRenderer& h = *hw;
     fprintf(stderr, "[GPUTRACE] frame %d: vulkan ms/frame poly %.2f (upload %.2f hash %.2f, %.0f KB) "
-            "wait+readback %.2f writeback %.2f | upload px/frame %.0f\n", frame, h.t_poly / 60, h.t_begin / 60,
-            h.t_hash / 60, h.hashed_bytes / 60.0 / 1024.0, h.t_wait / 60, h.t_writeback / 60, h.pixels / 60.0);
+            "wait+readback %.2f writeback %.2f | upload px/frame %.0f, sessions kept %llu filled %llu\n", frame,
+            h.t_poly / 60, h.t_begin / 60, h.t_hash / 60, h.hashed_bytes / 60.0 / 1024.0, h.t_wait / 60,
+            h.t_writeback / 60, h.pixels / 60.0, (unsigned long long)h.reused, (unsigned long long)h.uniform);
     h.t_poly = h.t_begin = h.t_hash = h.t_wait = h.t_writeback = 0;
     h.hashed_bytes = h.pixels = 0;
 }

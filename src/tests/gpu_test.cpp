@@ -2,6 +2,7 @@
 // Each scenario sets PICA registers, draws random clipped triangles with both renderers on the
 // same starting memory, and compares the color / depth / stencil buffers they leave in VRAM.
 // Needs a Vulkan device (lavapipe works). Exit code 77 = skipped (no Vulkan).
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -53,6 +54,8 @@ struct Scenario
     float tc_min, tc_max;
     int color_bpp;
     std::function<void(GPU&, int)> per_triangle; //optional state change between triangles
+    int lists = 1; //the triangles are split over this many command lists
+    std::function<void(GPU&, Emulator&, int)> between_lists; //optional: runs after each list but the last
 };
 
 void tev_stage(GPU& g, int i, uint32_t src, uint32_t operand, uint32_t op, uint32_t cnst, uint32_t scale)
@@ -116,6 +119,12 @@ void texture_regs(GPU& g, int unit, uint32_t addr, int w, int h, int fmt, int sw
     }
 }
 
+void depth_less_setup(GPU& g)
+{
+    common_setup(g, 0);
+    g.test_write_reg(0x107, 0xF00 | 1 | (4 << 4) | (1 << 12)); //LESS, depth write
+}
+
 Vertex random_vertex(bool perspective, float tc_min, float tc_max)
 {
     Vertex v;
@@ -150,8 +159,15 @@ Snapshot run(Emulator& e, const Scenario& s, const char* renderer, const std::ve
     memcpy(e.phys_ptr(0x18000000, (uint32_t)init_vram.size()), init_vram.data(), init_vram.size());
     rng_state = seed;
     s.setup(g);
+    int per_list = s.triangles / std::max(s.lists, 1);
     for (int i = 0; i < s.triangles; i++)
     {
+        if (s.lists > 1 && i && i % per_list == 0 && i / per_list < s.lists)
+        {
+            g.test_end_list();
+            if (s.between_lists)
+                s.between_lists(g, e, i / per_list - 1);
+        }
         if (s.per_triangle)
             s.per_triangle(g, i);
         Vertex a = random_vertex(s.perspective, s.tc_min, s.tc_max);
@@ -371,6 +387,32 @@ int main(int argc, char** argv)
             common_setup(g, 2);
             g.test_write_reg(0x040, 2);
         }, 24, false, 0, 1, 2, nullptr},
+        //Several command lists on the same buffers: the Vulkan target is kept between them while
+        //memory is unchanged, and must be uploaded again when the CPU changed it or filled it
+        {"lists-kept", depth_less_setup, 36, true, 0, 1, 4, nullptr, 4, nullptr},
+        {"lists-cpu-write", depth_less_setup, 36, true, 0, 1, 4, nullptr, 4, [](GPU&, Emulator& e, int list) {
+            uint8_t* c = e.phys_ptr(COLOR, W * H * 4);
+            uint8_t* d = e.phys_ptr(DEPTH, W * H * 4);
+            for (int i = 0; i < W * H * 4; i += 7 + list)
+            {
+                c[i] ^= 0x5A;
+                d[i] ^= 0xA5;
+            }
+        }},
+        {"lists-fill", depth_less_setup, 36, true, 0, 1, 4, nullptr, 4, [](GPU&, Emulator& e, int list) {
+            uint8_t* c = e.phys_ptr(COLOR, W * H * 4);
+            uint8_t* d = e.phys_ptr(DEPTH, W * H * 4);
+            for (int i = 0; i < W * H; i++)
+            {
+                uint32_t cv = 0x20406080u + list, dv = 0x00C00000u | ((uint32_t)list << 24);
+                memcpy(c + i * 4, &cv, 4);
+                memcpy(d + i * 4, &dv, 4);
+            }
+        }},
+        {"lists-two-targets", depth_less_setup, 36, true, 0, 1, 4, nullptr, 4, [](GPU& g, Emulator&, int list) {
+            //Odd lists draw to another color buffer, so COLOR alternates between being drawn and not
+            g.test_write_reg(0x11D, (list % 2 == 0 ? COLOR + 0x40000 : COLOR) >> 3);
+        }},
     };
 
     int failures = 0;
