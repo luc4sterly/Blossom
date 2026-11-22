@@ -33,6 +33,9 @@ enum Bucket
     JIT_CODE_CHECK,
     JIT_GLUE,
     JIT_COMPILE,
+    //Inside gpu-cmd: vertex attribute fetch, and primitive assembly/clipping/setup (raster excluded)
+    GPU_VTX_FETCH,
+    GPU_PRIM,
     BUCKET_COUNT
 };
 

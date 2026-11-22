@@ -1155,6 +1155,13 @@ void Emulator::arm9_write32(uint32_t addr, uint32_t value)
 
 uint8_t Emulator::arm11_read8(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint8_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x10140000 && addr < 0x10140010)
         return dsp_mem_config[addr & 0xF];
     if (addr >= 0x10144000 && addr < 0x10145000)
@@ -1211,6 +1218,13 @@ uint8_t Emulator::arm11_read8(int core, uint32_t addr)
 
 uint16_t Emulator::arm11_read16(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint16_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x10103000 && addr < 0x10104000)
     {
         printf("[CSND] Unrecognized read16 $%08X\n", addr);
@@ -1273,6 +1287,13 @@ uint16_t Emulator::arm11_read16(int core, uint32_t addr)
 
 uint32_t Emulator::arm11_read32(int core, uint32_t addr)
 {
+    //FCRAM first: it is what the GPU's vertex/index/command fetches and most slow JIT accesses hit
+    if (addr - 0x20000000 < fcram_size)
+    {
+        uint32_t value;
+        std::memcpy(&value, &fcram[addr - 0x20000000], sizeof(value));
+        return value;
+    }
     if (addr >= 0x17E00000 && addr < 0x17E02000)
     {
         //Bit of a hack: Since we do not handle accurate ARM11 timings, we shave off a cycle for MPR reads.
