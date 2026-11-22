@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -156,8 +157,8 @@ struct GPU::HwRenderer
     std::thread worker;
     std::mutex m;
     std::condition_variable cv;
-    std::function<void()> job;
-    bool job_done = true, stop = false;
+    std::deque<std::function<void()>> jobs;
+    bool running_job = false, stop = false;
 
     void start_worker()
     {
@@ -165,15 +166,16 @@ struct GPU::HwRenderer
             std::unique_lock<std::mutex> lock(m);
             while (true)
             {
-                cv.wait(lock, [this] { return stop || job; });
+                cv.wait(lock, [this] { return stop || !jobs.empty(); });
                 if (stop)
                     return;
-                std::function<void()> j = std::move(job);
-                job = nullptr;
+                std::function<void()> j = std::move(jobs.front());
+                jobs.pop_front();
+                running_job = true;
                 lock.unlock();
                 j();
                 lock.lock();
-                job_done = true;
+                running_job = false;
                 cv.notify_all();
             }
         });
@@ -181,14 +183,13 @@ struct GPU::HwRenderer
     void post(std::function<void()> j)
     {
         std::lock_guard<std::mutex> lock(m);
-        job = std::move(j);
-        job_done = false;
+        jobs.push_back(std::move(j));
         cv.notify_all();
     }
     void wait_job()
     {
         std::unique_lock<std::mutex> lock(m);
-        cv.wait(lock, [this] { return job_done; });
+        cv.wait(lock, [this] { return jobs.empty() && !running_job; });
     }
     ~HwRenderer()
     {
@@ -386,6 +387,14 @@ void GPU::hw_end_session()
         hw_finish_session(color_mem, depth_mem);
         hw_sync();
     }
+}
+
+bool GPU::hw_defer(std::function<void()> work)
+{
+    if (!hw || !hw->in_flight || !hw->async)
+        return false;
+    hw->post(std::move(work));
+    return true;
 }
 
 void GPU::hw_sync()
@@ -878,6 +887,7 @@ void GPU::hw_print_stats(int) {}
 
 void GPU::hw_end_session() {}
 void GPU::hw_sync() {}
+bool GPU::hw_defer(std::function<void()>) { return false; }
 void GPU::hw_polygon(std::vector<Vertex>&) {}
 
 #endif

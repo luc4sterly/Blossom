@@ -1,6 +1,7 @@
 #ifndef GPU_HPP
 #define GPU_HPP
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include "core/arm11/gpu_floats.hpp"
 #include "core/arm11/vector_math.hpp"
@@ -428,6 +429,10 @@ class GPU
         void hw_finish_session(uint8_t* color_mem, uint8_t* depth_mem);
         void hw_end_session();
         void hw_sync(); //Waits for the last session's writeback (see gpu_hw.cpp)
+        //Queues work behind a session still being written back, on the worker thread; false
+        //(nothing queued) when there is none
+        bool hw_defer(std::function<void()> work);
+        void run_transfer(TransferEngine dma);
         void hw_shutdown();
         void hw_print_stats(int frame);
         uint32_t hw_read_fb(uint32_t addr, int size);

@@ -313,7 +313,47 @@ uint32_t GPU::get_swizzled_tile_addr(uint32_t base, uint32_t width, uint32_t x, 
 void GPU::do_transfer_engine_dma(uint64_t param)
 {
     Profiler::Scope prof_scope(Profiler::GPU_TRANSFER);
-    hw_sync();
+    TransferEngine params = dma;
+    //A transfer usually copies what the last command list drew. While that is still being
+    //written back on the Vulkan worker thread, the transfer is queued behind it instead of
+    //waiting; hw_sync() (next session, memory fill, LCD output) waits for both. Only for
+    //buffers in plain memory, which the worker reads and writes through pointers.
+    bool deferred = false;
+    {
+        bool texcopy = params.flags & (1 << 3);
+        static const int sizes[] = {4, 3, 2, 2, 2, 0, 0, 0};
+        uint32_t in_len = texcopy ? params.tc_size
+                                  : params.disp_input_width * params.disp_input_height * sizes[(params.flags >> 8) & 0x7];
+        uint32_t out_len = texcopy ? params.tc_size
+                                   : params.disp_output_width * params.disp_output_height * sizes[(params.flags >> 12) & 0x7];
+        if (in_len && out_len && e->phys_ptr(params.input_addr, in_len) && e->phys_ptr(params.output_addr, out_len))
+            deferred = hw_defer([this, params] { run_transfer(params); });
+    }
+    if (!deferred)
+    {
+        hw_sync();
+        run_transfer(params);
+    }
+    //The registers end where the transfer leaves them
+    if (dma.flags & (1 << 3))
+    {
+        dma.input_addr += dma.tc_size;
+        dma.output_addr += dma.tc_size;
+    }
+    else if (dma.flags & (1 << 24))
+    {
+        dma.disp_input_width >>= 1;
+        dma.disp_output_width >>= 1;
+    }
+    stats.ppf++;
+    pmr->assert_hw_irq(0x2C);
+    dma.busy = false;
+    dma.finished = true;
+}
+
+//The transfer itself, on a copy of the registers (it may run on the Vulkan worker thread)
+void GPU::run_transfer(TransferEngine dma)
+{
     //VRAM/FCRAM are plain memory: go through a pointer instead of the ARM11 bus for each pixel
     auto rd = [&](uint32_t addr, int size) -> uint32_t {
         if (uint8_t* p = e->phys_ptr(addr, size))
@@ -543,10 +583,6 @@ void GPU::do_transfer_engine_dma(uint64_t param)
                 input_y++;
         }
     }
-    stats.ppf++;
-    pmr->assert_hw_irq(0x2C);
-    dma.busy = false;
-    dma.finished = true;
 }
 
 void GPU::start_command_engine_dma(int index)
